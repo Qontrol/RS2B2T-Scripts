@@ -1,8 +1,6 @@
 /**
  * AlKharidNetFisher — small-net only at 3267,3149; stays and waits there when the spot hops away.
- * On combat: run to Al Kharid bank, wait 60s, then fish again.
- * On death: walk back to the spot, loot the net, continue.
- * Banks catch; optional cook-then-bank after a full inventory.
+ * Banks catch; optional cook-then-bank after a full inventory (Al Kharid Range).
  * Completely vibe coded by @.benzyme on Discord via Cursor AI
  * Self-contained ESM for rs2b0t Load local script / Load URL.
  */
@@ -43,10 +41,6 @@ const PREFERRED_RADIUS = 1;
 /** Soft stand radius — recenter on the pin if we drift. */
 const STAND_RADIUS = 1;
 
-/** Al Kharid bank — combat safe haven. */
-const BANK_STAND = new Tile(3269, 3167, 0);
-const COMBAT_WAIT_MS = 60_000;
-
 /** Al Kharid house Range (catalog 3271,3180) — stand one south. */
 const RANGE_STAND = new Tile(3271, 3179, 0);
 const RANGE_LOC = new Tile(3271, 3180, 0);
@@ -55,7 +49,6 @@ const RANGE_LEASH = 6;
 const NET_NAME = 'Small fishing net';
 const SPOT_NAME = 'Fishing spot';
 const NET_OP = 'Net';
-const DEATH_RE = /oh dear.*you are dead/i;
 
 function fmtXph(n) {
     if (n >= 100_000) {
@@ -258,6 +251,7 @@ class AlKharidNetFisher extends LoopingBot {
     fishXpAtStart = 0;
     cookXpAtStart = 0;
     fishCaught = 0;
+    /** Successfully cooked fish this session (not burnt / not raw consumed). */
     cooked = 0;
     bankTrips = 0;
     cookShrimp = true;
@@ -266,9 +260,6 @@ class AlKharidNetFisher extends LoopingBot {
     cookingLoad = false;
     /** Last seen raw count — used to tally catches across animating ticks. */
     lastRawSeen = 0;
-    combatFlees = 0;
-    deaths = 0;
-    recovering = false;
     /** True when the active Net session is on the preferred 3267,3149 hop. */
     fishingPreferred = false;
 
@@ -284,16 +275,9 @@ class AlKharidNetFisher extends LoopingBot {
         this.fishCaught = 0;
         this.cooked = 0;
         this.bankTrips = 0;
-        this.combatFlees = 0;
-        this.deaths = 0;
-        this.recovering = false;
         this.fishingPreferred = false;
         this.cookingLoad = false;
         this.lastRawSeen = rawFishCount();
-
-        if (typeof Game.setAutoRetaliate === 'function') {
-            Game.setAutoRetaliate(false);
-        }
 
         this.on('skill.level', e => {
             if (e.name === 'fishing' || e.name === 'cooking') {
@@ -301,20 +285,9 @@ class AlKharidNetFisher extends LoopingBot {
             }
         });
 
-        this.on('chat.message', e => {
-            if (DEATH_RE.test(e.text) && !this.recovering) {
-                this.recovering = true;
-                this.cookingLoad = false;
-                this.fishingPreferred = false;
-                this.deaths++;
-                this.status = 'dead';
-                this.log(`died (#${this.deaths}) — will walk back to ${ANCHOR.x},${ANCHOR.z}, loot net, continue`);
-            }
-        });
-
         this.log(
             `AlKharidNetFisher — stay/wait at ${ANCHOR.x},${ANCHOR.z} only — ` +
-                `cook: ${this.cookShrimp ? 'on' : 'off'}; combat → bank + 60s; death → return + loot net`
+                `cook: ${this.cookShrimp ? 'on' : 'off'}`
         );
         if (!hasNet()) {
             this.log('WARNING: no Small fishing net in inventory — will try ground loot if needed');
@@ -333,51 +306,9 @@ class AlKharidNetFisher extends LoopingBot {
             this.unlockTimer = null;
         }
         this.log(
-            `stopped — caught ~${this.fishCaught}, cooked ~${this.cooked}, ` +
-                `bank trips ${this.bankTrips}, combat flees ${this.combatFlees}, deaths ${this.deaths} (${this.status})`
+            `stopped — caught ~${this.fishCaught}, cooked ${this.cooked}, ` +
+                `bank trips ${this.bankTrips} (${this.status})`
         );
-    }
-
-    /**
-     * After death: wait for respawn, walk to the fishing pin, loot Small fishing net, resume.
-     */
-    async recoverFromDeath() {
-        const ready = await Execution.delayUntil(
-            () => Game.ingame() && Game.tile() !== null,
-            30_000
-        );
-        if (!ready) {
-            this.log('still waiting for respawn…');
-            return;
-        }
-        await Execution.delayTicks(3);
-
-        this.status = 'death — walking to fishing spot';
-        this.log(`death recovery — walking to ${ANCHOR.x},${ANCHOR.z}`);
-        const ok = await Traversal.walkResilient(ANCHOR, {
-            radius: 2,
-            log: m => this.log(`  ${m}`)
-        });
-        if (!ok) {
-            this.log('could not reach fishing spot after death — will retry');
-            return;
-        }
-
-        if (!hasNet()) {
-            this.status = 'death — looting net';
-            const looted = await this.lootNetFromGround({ wide: true });
-            if (!looted) {
-                this.log('net not on ground yet — waiting near death pile');
-                await Execution.delayTicks(5);
-                return;
-            }
-        }
-
-        this.recovering = false;
-        this.fishingPreferred = false;
-        this.lastRawSeen = rawFishCount();
-        this.status = 'fishing';
-        this.log('death recovery done — net secured, continuing');
     }
 
     /**
@@ -425,55 +356,6 @@ class AlKharidNetFisher extends LoopingBot {
         return got && hasNet();
     }
 
-    /**
-     * Scorpion / anything aggro: break combat by running to the bank, sit 60s, then resume.
-     */
-    async fleeCombatToBank() {
-        this.combatFlees++;
-        this.cookingLoad = false;
-        this.fishingPreferred = false;
-        if (typeof Game.setAutoRetaliate === 'function') {
-            Game.setAutoRetaliate(false);
-        }
-
-        this.status = 'combat — fleeing to bank';
-        this.log(`in combat — running to Al Kharid bank (flee #${this.combatFlees})`);
-        await Traversal.walkResilient(BANK_STAND, {
-            radius: 2,
-            log: m => this.log(`  ${m}`)
-        });
-
-        await Execution.delayUntil(() => !Game.inCombat(), 20_000);
-
-        this.status = 'combat — waiting 60s at bank';
-        this.log('at bank — waiting 60s before fishing again');
-        const until = Date.now() + COMBAT_WAIT_MS;
-        while (Date.now() < until) {
-            if (!Game.ingame()) {
-                await Execution.delayTicks(5);
-                continue;
-            }
-            if (Game.inCombat()) {
-                this.log('still in combat at bank — walking further / waiting');
-                await Traversal.walkTo(BANK_STAND, { radius: 1, timeoutMs: 8_000 });
-                await Execution.delayUntil(() => !Game.inCombat(), 10_000);
-            }
-            const left = until - Date.now();
-            if (left <= 0) {
-                break;
-            }
-            this.status = `combat — wait ${Math.ceil(left / 1000)}s`;
-            await Execution.delay(Math.min(1000, left));
-        }
-
-        this.log('wait done — returning to fishing camp');
-        this.status = 'returning to spot';
-        await Traversal.walkResilient(ANCHOR, {
-            radius: 2,
-            log: m => this.log(`  ${m}`)
-        });
-    }
-
     syncPrefs({ silent = false } = {}) {
         const prev = this.cookShrimp;
         this.cookShrimp = readPrefBool(
@@ -494,6 +376,17 @@ class AlKharidNetFisher extends LoopingBot {
         this.lastRawSeen = now;
     }
 
+    /** Credit newly appearing cooked fish (successful cooks only — not burns). */
+    noteCooked(beforeCooked) {
+        const now = cookedFishCount();
+        if (now > beforeCooked) {
+            const gained = now - beforeCooked;
+            this.cooked += gained;
+            return gained;
+        }
+        return 0;
+    }
+
     async loop() {
         if (!Game.ingame()) {
             await Execution.delayTicks(5);
@@ -503,16 +396,6 @@ class AlKharidNetFisher extends LoopingBot {
         this.syncPrefs({ silent: true });
         unlockPausedPrefsUi();
         this.noteCatches();
-
-        if (this.recovering) {
-            await this.recoverFromDeath();
-            return;
-        }
-
-        if (Game.inCombat()) {
-            await this.fleeCombatToBank();
-            return;
-        }
 
         if (ChatDialog.canContinue()) {
             this.status = 'continue dialog';
@@ -536,7 +419,7 @@ class AlKharidNetFisher extends LoopingBot {
                 this.log('looted Small fishing net — continuing');
                 return;
             }
-            this.log('no Small fishing net — loot death pile or withdraw one, then continue');
+            this.log('no Small fishing net — withdraw one, then continue');
             await Execution.delayTicks(8);
             return;
         }
@@ -632,7 +515,6 @@ class AlKharidNetFisher extends LoopingBot {
                 rawFishCount() > before ||
                 Game.animating() ||
                 ChatDialog.canContinue() ||
-                Game.inCombat() ||
                 !this.findPreferredSpot(),
             8000
         );
@@ -730,10 +612,32 @@ class AlKharidNetFisher extends LoopingBot {
             await Execution.delayTicks(1);
             return;
         }
+
         await Execution.delayUntil(
             () => !ChatDialog.isMakeMenu() && (Game.animating() || cookableCount() === 0),
             5000
         );
+
+        // Count successful cooks for the rest of this make-X batch.
+        let cookedMark = cookedFishCount();
+        let idle = 0;
+        for (let guard = 0; guard < 400 && cookableCount() > 0; guard++) {
+            if (ChatDialog.canContinue() || ChatDialog.isMakeMenu()) {
+                this.noteCooked(cookedMark);
+                return;
+            }
+            await Execution.delayTicks(1);
+            const gained = this.noteCooked(cookedMark);
+            if (gained > 0) {
+                cookedMark = cookedFishCount();
+                idle = 0;
+            } else if (!Game.animating() && ++idle >= 14) {
+                break;
+            } else if (Game.animating()) {
+                idle = 0;
+            }
+        }
+        this.noteCooked(cookedMark);
     }
 
     async cookLoad() {
@@ -757,6 +661,13 @@ class AlKharidNetFisher extends LoopingBot {
 
         if (ChatDialog.isMakeMenu()) {
             await this.chooseCookProduct();
+            if (cookableCount() === 0) {
+                if (burntCount() > 0) {
+                    await this.dropBurnt();
+                }
+                this.cookingLoad = false;
+                await this.bankAndReturn();
+            }
             return;
         }
 
@@ -767,7 +678,7 @@ class AlKharidNetFisher extends LoopingBot {
         }
 
         const beforeRaw = cookableCount();
-        const beforeCooked = cookedFishCount();
+        let cookedMark = cookedFishCount();
         const beforeXp = Skills.xp('cooking');
         this.status = `cooking ${raw.name}`;
         this.log(`use ${raw.name} on ${oven.name ?? 'Range'}`);
@@ -789,6 +700,14 @@ class AlKharidNetFisher extends LoopingBot {
 
         if (ChatDialog.isMakeMenu()) {
             await this.chooseCookProduct();
+            if (cookableCount() === 0) {
+                if (burntCount() > 0) {
+                    await this.dropBurnt();
+                }
+                this.cookingLoad = false;
+                await this.bankAndReturn();
+            }
+            return;
         }
 
         if (!started && cookableCount() >= beforeRaw) {
@@ -800,17 +719,17 @@ class AlKharidNetFisher extends LoopingBot {
         let mark = cookableCount();
         let idle = 0;
         for (let guard = 0; guard < 400 && cookableCount() > 0; guard++) {
-            if (Game.inCombat()) {
-                this.log('combat while cooking — aborting to flee');
-                return;
-            }
             if (ChatDialog.canContinue() || ChatDialog.isMakeMenu()) {
+                this.noteCooked(cookedMark);
                 return;
             }
             await Execution.delayTicks(1);
+            const gained = this.noteCooked(cookedMark);
+            if (gained > 0) {
+                cookedMark = cookedFishCount();
+            }
             const now = cookableCount();
             if (now < mark) {
-                this.cooked += mark - now;
                 mark = now;
                 idle = 0;
             } else if (!Game.animating() && ++idle >= 14) {
@@ -820,10 +739,7 @@ class AlKharidNetFisher extends LoopingBot {
             }
         }
 
-        const gainedCooked = cookedFishCount() - beforeCooked;
-        if (gainedCooked > 0) {
-            this.log(`cooked +${gainedCooked} (session ~${this.cooked})`);
-        }
+        this.noteCooked(cookedMark);
 
         if (cookableCount() === 0) {
             if (burntCount() > 0) {
@@ -884,14 +800,14 @@ class AlKharidNetFisher extends LoopingBot {
         const fishXph = hrs > 0.008 ? fishXp / hrs : 0;
         const cookXph = hrs > 0.008 ? cookXp / hrs : 0;
         const catchPh = hrs > 0.008 ? this.fishCaught / hrs : 0;
+        const cookedPh = hrs > 0.008 ? this.cooked / hrs : 0;
 
         const lines = [
             `AlKharid Net  Fish ${Skills.level('fishing')}  Cook ${Skills.level('cooking')}`,
             `time ${fmtElapsed(elapsed)}  ·  ${this.cookShrimp ? 'cook→bank' : 'bank raw'}  ·  ${this.status}`,
-            `caught ${this.fishCaught} (${fmtXph(catchPh)}/hr)  cooked ~${this.cooked}  trips ${this.bankTrips}`,
-            `Fish ${fmtXph(fishXph)}/hr` +
-                (this.cookShrimp || cookXp > 0 ? `  Cook ${fmtXph(cookXph)}/hr` : '') +
-                `  flees ${this.combatFlees}  deaths ${this.deaths}  raw ${rawFishCount()}`
+            `caught ${this.fishCaught} (${fmtXph(catchPh)}/hr)  cooked ${this.cooked} (${fmtXph(cookedPh)}/hr)`,
+            `trips ${this.bankTrips}  raw ${rawFishCount()}  Fish XP ${fmtXph(fishXph)}/hr` +
+                (this.cookShrimp || cookXp > 0 ? `  Cook XP ${fmtXph(cookXph)}/hr` : '')
         ];
 
         ctx.font = '12px monospace';
@@ -912,11 +828,11 @@ class AlKharidNetFisher extends LoopingBot {
 
 export default defineBot({
     name: SCRIPT_NAME,
-    version: '1.3.0',
+    version: '1.4.0',
     category: 'Fishing',
-    tags: ['fishing', 'al-kharid', 'net', 'shrimp', 'anchovies', 'bank', 'cook', 'combat', 'death'],
+    tags: ['fishing', 'al-kharid', 'net', 'shrimp', 'anchovies', 'bank', 'cook'],
     description:
-        'Stays and waits at 3267,3149 — only Nets that hop. Combat→bank+60s. Death→walk back, loot net, continue. Optional cook then bank.',
+        'Stays and waits at 3267,3149 — only Nets that hop. Optional cook on Al Kharid Range then bank. Overlay shows cooked count and cooked/hr.',
     settingsSchema: {
         cookShrimp: {
             type: 'boolean',
