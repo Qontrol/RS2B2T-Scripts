@@ -464,6 +464,10 @@ class ProgressiveWcFletcher extends LoopingBot {
     planId = 'shafts';
     gearReady = false;
     needSteelBuy = false;
+    /** Wall-clock of last fletch progress (log drop / anim / make menu / knife use). */
+    fletchActionAt = 0;
+    /** Log count snapshot for stuck detection. */
+    fletchLogMark = -1;
 
     async onStart() {
         await Execution.delayUntil(() => Game.ingame() && Game.tile() !== null, 0);
@@ -480,6 +484,8 @@ class ProgressiveWcFletcher extends LoopingBot {
                 : faladorPlan(Skills.level('fletching')).id;
         this.gearReady = false;
         this.needSteelBuy = false;
+        this.fletchActionAt = 0;
+        this.fletchLogMark = -1;
 
         this.on('skill.level', e => {
             if (e.name === 'fletching' || e.name === 'woodcutting') {
@@ -1313,6 +1319,85 @@ class ProgressiveWcFletcher extends LoopingBot {
 
     /* ═══════════ Shared chop / fletch ═══════════ */
 
+    noteFletchAction(logCount) {
+        this.fletchActionAt = Date.now();
+        if (typeof logCount === 'number') {
+            this.fletchLogMark = logCount;
+        }
+    }
+
+    /** One random adjacent tile — clears stuck knife/make-menu state. */
+    async nudgeOneStep() {
+        const here = Game.tile();
+        if (!here) {
+            return false;
+        }
+        const dirs = [
+            [1, 0],
+            [-1, 0],
+            [0, 1],
+            [0, -1],
+            [1, 1],
+            [-1, 1],
+            [1, -1],
+            [-1, -1]
+        ];
+        for (let i = dirs.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            const tmp = dirs[i];
+            dirs[i] = dirs[j];
+            dirs[j] = tmp;
+        }
+        this.status = 'fletch unstick';
+        for (const [dx, dz] of dirs) {
+            const dest = new Tile(here.x + dx, here.z + dz, here.level ?? 0);
+            this.log(`fletch jammed 5s — stepping to ${dest.x},${dest.z} then retry`);
+            await Traversal.walkTo(dest, { radius: 0, timeoutMs: 4_000 });
+            await Execution.delayTicks(1);
+            return true;
+        }
+        return false;
+    }
+
+    /**
+     * Full pack of logs with no fletch progress for 5s → step once and retry.
+     * @returns {Promise<boolean>} true if this call spent time unsticking
+     */
+    async unstickIfFletchJammed(logCountFn) {
+        if (!Inventory.isFull() || logCountFn() === 0) {
+            this.fletchActionAt = 0;
+            this.fletchLogMark = -1;
+            return false;
+        }
+
+        const now = Date.now();
+        const logs = logCountFn();
+
+        if (Game.animating() || ChatDialog.isMakeMenu() || ChatDialog.canContinue()) {
+            this.noteFletchAction(logs);
+            return false;
+        }
+
+        if (this.fletchLogMark >= 0 && logs < this.fletchLogMark) {
+            this.noteFletchAction(logs);
+            return false;
+        }
+
+        if (this.fletchActionAt <= 0) {
+            this.noteFletchAction(logs);
+            return false;
+        }
+
+        this.fletchLogMark = logs;
+        if (now - this.fletchActionAt < 5_000) {
+            return false;
+        }
+
+        await this.nudgeOneStep();
+        this.noteFletchAction(logCountFn());
+        return true;
+    }
+
     findTree(treeName, anchor, leash, maxDistFromPlayer = null) {
         let q = Locs.query()
             .name(treeName)
@@ -1361,6 +1446,10 @@ class ProgressiveWcFletcher extends LoopingBot {
             return;
         }
 
+        if (await this.unstickIfFletchJammed(logCountFn)) {
+            return;
+        }
+
         if (ChatDialog.isMakeMenu()) {
             await this.chooseMakeProduct(plan, preferOak, logCountFn);
             return;
@@ -1380,6 +1469,7 @@ class ProgressiveWcFletcher extends LoopingBot {
         this.status = `fletching ${plan.label}`;
         this.log(`knife → logs (${logCountFn()} left) for ${plan.label}`);
         const before = logCountFn();
+        this.noteFletchAction(before);
         if (!(await knife.useOn(log))) {
             await Execution.delayTicks(2);
             return;
@@ -1393,6 +1483,10 @@ class ProgressiveWcFletcher extends LoopingBot {
                 Game.animating(),
             8000
         );
+
+        if (ChatDialog.isMakeMenu() || logCountFn() < before || Game.animating()) {
+            this.noteFletchAction(logCountFn());
+        }
 
         if (ChatDialog.isMakeMenu()) {
             await this.chooseMakeProduct(plan, preferOak, logCountFn);
@@ -1425,6 +1519,7 @@ class ProgressiveWcFletcher extends LoopingBot {
         const start = logCountFn();
         this.status = `make ${plan.label}`;
         this.log(`selecting '${match}' x${start}`);
+        this.noteFletchAction(start);
 
         let picked = false;
         if (typeof ChatDialog.makeX === 'function') {
@@ -1440,6 +1535,7 @@ class ProgressiveWcFletcher extends LoopingBot {
             return;
         }
 
+        this.noteFletchAction(logCountFn());
         await Execution.delayUntil(
             () =>
                 !ChatDialog.isMakeMenu() &&
@@ -1448,9 +1544,10 @@ class ProgressiveWcFletcher extends LoopingBot {
         );
 
         let mark = logCountFn();
-        let idle = 0;
+        let lastProgressAt = Date.now();
         for (let guard = 0; guard < 400 && logCountFn() > 0; guard++) {
             if (ChatDialog.canContinue() || ChatDialog.isMakeMenu()) {
+                this.noteFletchAction(logCountFn());
                 return;
             }
             await Execution.delayTicks(1);
@@ -1458,11 +1555,16 @@ class ProgressiveWcFletcher extends LoopingBot {
             if (now < mark) {
                 this.fletched += mark - now;
                 mark = now;
-                idle = 0;
-            } else if (!Game.animating() && ++idle >= 12) {
-                return;
+                lastProgressAt = Date.now();
+                this.noteFletchAction(now);
             } else if (Game.animating()) {
-                idle = 0;
+                lastProgressAt = Date.now();
+                this.noteFletchAction(now);
+            } else if (Date.now() - lastProgressAt >= 5_000) {
+                this.log('fletch stalled 5s mid-batch — stepping and retrying');
+                await this.nudgeOneStep();
+                this.noteFletchAction(logCountFn());
+                return;
             }
         }
     }
