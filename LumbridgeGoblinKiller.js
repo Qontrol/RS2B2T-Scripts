@@ -19,7 +19,6 @@ const {
     Game,
     LoopingBot,
     Npcs,
-    Locs,
     GroundItems,
     Equipment,
     Inventory,
@@ -31,42 +30,45 @@ const {
 
 const SCRIPT_NAME = 'LumbridgeGoblinKiller';
 
-/** Lozar's house / east Lumbridge goblins */
-const GOBLIN_SPOT = new Tile(3243, 3247, 0);
+/** Outdoor goblin camp — south of the house door (3246,3244). */
+const GOBLIN_SPOT = new Tile(3246, 3242, 0);
 const LEASH = 12;
+/**
+ * Goblin house interior (ground floor). Door @ 3246,3244 faces south —
+ * do not voluntarily Attack goblins inside these bounds (or upstairs).
+ */
+const HOUSE_X0 = 3243;
+const HOUSE_X1 = 3248;
+const HOUSE_Z0 = 3245;
+const HOUSE_Z1 = 3249;
 const GEAR = ['Bronze sword', 'Wooden shield'];
 const DEATH_RE = /oh dear.*you are dead/i;
 const CANT_REACH_RE = /i can't reach that/i;
-const TOWARD_SLACK = 4;
 
 /** Melee styles that train a single combat skill (1:1 with the skill name). */
 const TRAINABLE = ['attack', 'strength', 'defence'];
 /** Skills we may show XP/hr for once they gain XP this session. */
 const COMBAT_TRACK = ['attack', 'strength', 'defence', 'hitpoints', 'prayer'];
 
-function cheb(a, b) {
-    return Math.max(Math.abs(a.x - b.x), Math.abs(a.z - b.z));
-}
-
-/** Prefer doors that lie toward the target (not behind us). */
-function towardDest(door, here, dest) {
-    return cheb(door, dest) <= cheb(here, dest) + TOWARD_SLACK;
-}
-
-function isShutDoor(loc) {
-    const name = (loc.name ?? '').toLowerCase();
-    if (!name.includes('door')) {
-        return false;
-    }
-    return loc.actions().some(a => /^open/i.test(a));
-}
-
-function openDoorOp(loc) {
-    return loc.actions().find(a => /^open/i.test(a)) ?? null;
-}
-
 function npcTargetsMe(n) {
     return typeof n.targetsMe === 'function' && !!n.targetsMe();
+}
+
+/** True when the tile is inside the goblin house (skip these for voluntary attacks). */
+function isInsideGoblinHouse(tile) {
+    if (!tile) {
+        return false;
+    }
+    const level = tile.level ?? 0;
+    if (level > 0) {
+        return true;
+    }
+    return (
+        tile.x >= HOUSE_X0 &&
+        tile.x <= HOUSE_X1 &&
+        tile.z >= HOUSE_Z0 &&
+        tile.z <= HOUSE_Z1
+    );
 }
 
 function fmtXph(n) {
@@ -329,7 +331,7 @@ class LumbridgeGoblinKiller extends LoopingBot {
 
         if (Tile.from(here).distanceTo(GOBLIN_SPOT) > LEASH) {
             this.status = 'walking to goblins';
-            this.log('walking to goblin house');
+            this.log('walking to outdoor goblins');
             const ok = await Traversal.walkResilient(GOBLIN_SPOT, {
                 radius: 4,
                 log: msg => this.log(`  ${msg}`)
@@ -480,11 +482,15 @@ class LumbridgeGoblinKiller extends LoopingBot {
     }
 
     /**
-     * Attack a goblin; if the house door blocks us, open it and retry the same NPC.
+     * Attack an outdoor goblin. Indoor house goblins are never selected for attack.
      */
     async attackGoblin(goblin) {
-        const index = goblin.index;
         const targetTile = goblin.tile();
+        if (isInsideGoblinHouse(targetTile) && !npcTargetsMe(goblin)) {
+            this.log(`skipping house goblin @ ${targetTile.x},${targetTile.z}`);
+            await Execution.delayTicks(1);
+            return;
+        }
 
         this.status = `attacking (${goblin.distance()}t)`;
         this.log(`attacking Goblin @ ${targetTile.x},${targetTile.z}`);
@@ -497,49 +503,6 @@ class LumbridgeGoblinKiller extends LoopingBot {
 
         if (Game.inCombat() || this.findGoblinFightingMe()) {
             this.attacks++;
-            return;
-        }
-
-        const blockingDoor = this.findShutDoorToward(targetTile);
-        if (!this.cantReach && !blockingDoor) {
-            return;
-        }
-
-        this.log(
-            this.cantReach
-                ? "can't reach goblin — opening door then retrying"
-                : 'attack blocked by door — opening then retrying'
-        );
-        this.status = 'opening door';
-        const opened = await this.openDoorToward(targetTile, blockingDoor);
-        if (!opened) {
-            this.log('no shut door found toward that goblin');
-            return;
-        }
-
-        const again =
-            Npcs.query()
-                .where(n => n.index === index)
-                .nearest() ?? this.findAttackableGoblin();
-
-        if (!again) {
-            this.log('goblin gone after opening door');
-            return;
-        }
-
-        this.status = `retry attack (${again.distance()}t)`;
-        this.log(`retrying Goblin @ ${again.tile().x},${again.tile().z}`);
-        this.cantReach = false;
-        await again.interact('Attack');
-        if (
-            await Execution.delayUntil(
-                () => Game.inCombat() || this.cantReach || this.findGoblinFightingMe() !== null,
-                4000
-            )
-        ) {
-            if (Game.inCombat() || this.findGoblinFightingMe()) {
-                this.attacks++;
-            }
         }
     }
 
@@ -553,8 +516,8 @@ class LumbridgeGoblinKiller extends LoopingBot {
     }
 
     /**
-     * Prefer the goblin already on us (re-engage after random events), else an idle one.
-     * Never start a fight on a goblin already in combat with someone else.
+     * Prefer the goblin already on us (re-engage after random events), else an idle outdoor one.
+     * Never start a fight on a goblin already in combat with someone else, or inside the house.
      */
     findAttackableGoblin() {
         const onMe = this.findGoblinFightingMe();
@@ -566,65 +529,8 @@ class LumbridgeGoblinKiller extends LoopingBot {
             .action('Attack')
             .within(LEASH + 4)
             .where(n => !n.inCombat)
+            .where(n => !isInsideGoblinHouse(n.tile()))
             .nearest();
-    }
-
-    findShutDoorToward(toward) {
-        const here = Game.tile();
-        if (!here) {
-            return null;
-        }
-        return (
-            Locs.query()
-                .where(l => isShutDoor(l))
-                .within(8)
-                .where(l => towardDest(l.tile(), here, toward))
-                .nearest() ??
-            Locs.query().where(l => isShutDoor(l)).within(6).nearest()
-        );
-    }
-
-    /** Open the nearest shut door toward `toward` (goblin outside the house). */
-    async openDoorToward(toward, knownDoor = null) {
-        const here = Game.tile();
-        if (!here) {
-            return false;
-        }
-
-        const door = knownDoor ?? this.findShutDoorToward(toward);
-        if (!door) {
-            return false;
-        }
-
-        const t = door.tile();
-        if (cheb(here, t) > 1) {
-            this.log(`walking to ${door.name} at ${t.x},${t.z}`);
-            await Traversal.walkTo(t, { radius: 1, timeoutMs: 15_000 });
-        }
-
-        const shut = Locs.query()
-            .where(l => l.tile().x === t.x && l.tile().z === t.z && isShutDoor(l))
-            .nearest();
-        if (!shut) {
-            return true;
-        }
-
-        const op = openDoorOp(shut);
-        if (!op) {
-            return false;
-        }
-
-        this.log(`opening ${shut.name} at ${t.x},${t.z}`);
-        if (!(await shut.interact(op))) {
-            return false;
-        }
-
-        return Execution.delayUntil(() => {
-            const still = Locs.query()
-                .where(l => l.tile().x === t.x && l.tile().z === t.z && isShutDoor(l))
-                .nearest();
-            return still === null;
-        }, 5000);
     }
 
     /**
