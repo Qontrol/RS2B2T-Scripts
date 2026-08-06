@@ -64,6 +64,18 @@ function fmtXph(n) {
     return String(Math.round(n));
 }
 
+/** Elapsed session time as H:MM:SS or M:SS. */
+function fmtElapsed(ms) {
+    const totalSec = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(totalSec / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+    if (h > 0) {
+        return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    }
+    return `${m}:${String(s).padStart(2, '0')}`;
+}
+
 function chopOp(actions) {
     return actions.find(a => /chop/i.test(a)) ?? null;
 }
@@ -523,8 +535,8 @@ class OakTreeFletcher extends LoopingBot {
 
     onPaint(ctx) {
         const plan = fletchPlan(Skills.level('fletching'));
-        const mins = (Date.now() - this.startedAt) / 60_000;
-        const hrs = mins / 60;
+        const elapsed = Date.now() - this.startedAt;
+        const hrs = elapsed / 3_600_000;
         const wcXp = Skills.xp('woodcutting') - this.wcXpAtStart;
         const flXp = Skills.xp('fletching') - this.fletchXpAtStart;
         const wcXph = hrs > 0.008 ? wcXp / hrs : 0;
@@ -532,7 +544,7 @@ class OakTreeFletcher extends LoopingBot {
 
         const lines = [
             `OakFletcher  WC ${Skills.level('woodcutting')}  Fletch ${Skills.level('fletching')}`,
-            `${plan.label}${plan.bank ? ' + bank' : ''}  ·  ${this.status}`,
+            `time ${fmtElapsed(elapsed)}  ·  ${plan.label}${plan.bank ? ' + bank' : ''}  ·  ${this.status}`,
             `logs ${logCount()}  bows ${bowCount()}  trips ${this.bankTrips}`,
             `WC ${fmtXph(wcXph)}/hr  Fletch ${fmtXph(flXph)}/hr`
         ];

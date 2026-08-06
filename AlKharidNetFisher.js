@@ -67,6 +67,18 @@ function fmtXph(n) {
     return String(Math.round(n));
 }
 
+/** Elapsed session time as H:MM:SS or M:SS. */
+function fmtElapsed(ms) {
+    const totalSec = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(totalSec / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+    if (h > 0) {
+        return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    }
+    return `${m}:${String(s).padStart(2, '0')}`;
+}
+
 function prefStorageKey(key) {
     const box =
         typeof location !== 'undefined'
@@ -865,8 +877,8 @@ class AlKharidNetFisher extends LoopingBot {
     }
 
     onPaint(ctx) {
-        const mins = (Date.now() - this.startedAt) / 60_000;
-        const hrs = mins / 60;
+        const elapsed = Date.now() - this.startedAt;
+        const hrs = elapsed / 3_600_000;
         const fishXp = Skills.xp('fishing') - this.fishXpAtStart;
         const cookXp = Skills.xp('cooking') - this.cookXpAtStart;
         const fishXph = hrs > 0.008 ? fishXp / hrs : 0;
@@ -875,7 +887,7 @@ class AlKharidNetFisher extends LoopingBot {
 
         const lines = [
             `AlKharid Net  Fish ${Skills.level('fishing')}  Cook ${Skills.level('cooking')}`,
-            `${this.cookShrimp ? 'cook→bank' : 'bank raw'}  ·  ${this.status}`,
+            `time ${fmtElapsed(elapsed)}  ·  ${this.cookShrimp ? 'cook→bank' : 'bank raw'}  ·  ${this.status}`,
             `caught ${this.fishCaught} (${fmtXph(catchPh)}/hr)  cooked ~${this.cooked}  trips ${this.bankTrips}`,
             `Fish ${fmtXph(fishXph)}/hr` +
                 (this.cookShrimp || cookXp > 0 ? `  Cook ${fmtXph(cookXph)}/hr` : '') +
