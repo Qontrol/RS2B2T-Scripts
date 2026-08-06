@@ -21,13 +21,19 @@ const {
     Game,
     LoopingBot,
     Locs,
+    GroundItems,
     Inventory,
+    Equipment,
     Bank,
     Banking,
+    Shop,
     Traversal,
     Tile,
     Skills,
-    ChatDialog
+    ChatDialog,
+    AXES,
+    bestAxe,
+    canWieldTool
 } = abi;
 
 const SCRIPT_NAME = 'OakTreeFletcher';
@@ -41,6 +47,12 @@ const LOG_NAME = 'Oak logs';
 /** Fletching tier thresholds. */
 const SHORTBOW_LEVEL = 20;
 const LONGBOW_LEVEL = 25;
+
+/** Lumbridge knife spawn (behind Bob's) + Bob steel axe. */
+const GEAR_KNIFE_SPAWN = new Tile(3224, 3202, 0);
+const GEAR_BOB_STAND = new Tile(3231, 3203, 0);
+const GEAR_STEEL_AXE = 'Steel axe';
+const GEAR_STEEL_COST = 200;
 
 /** Always keep these when banking (never deposit). */
 const KEEP_TOOLS = [
@@ -74,6 +86,60 @@ function fmtElapsed(ms) {
         return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
     }
     return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function gearAxeRank(name) {
+    const want = (name ?? '').toLowerCase();
+    const i = AXES.findIndex(t => t.name.toLowerCase() === want);
+    return i < 0 ? 999 : i;
+}
+
+function gearHasKnife() {
+    return (
+        Inventory.count('Knife') > 0 ||
+        Inventory.items().some(i => (i.name ?? '').toLowerCase() === 'knife')
+    );
+}
+
+function gearInvCoins() {
+    return Inventory.items()
+        .filter(i => (i.name ?? '').toLowerCase() === 'coins')
+        .reduce((n, i) => n + Math.max(0, i.count), 0);
+}
+
+function gearBankCoins() {
+    return Bank.count('Coins') || 0;
+}
+
+function gearAxeCount(name) {
+    return (Inventory.count(name) || 0) + (Equipment.contains(name) ? 1 : 0);
+}
+
+function gearBestHeldAxe() {
+    return bestAxe(Skills.level('woodcutting'), n => gearAxeCount(n) > 0);
+}
+
+function gearHasSteelOrBetter() {
+    const steelRank = gearAxeRank(GEAR_STEEL_AXE);
+    for (const t of AXES) {
+        if (gearAxeRank(t.name) > steelRank) {
+            continue;
+        }
+        if (gearAxeCount(t.name) > 0) {
+            return true;
+        }
+        if (Bank.isOpen() && (Bank.count(t.name) || 0) > 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+async function gearWaitBankLoaded() {
+    if (typeof Bank.loaded === 'function') {
+        await Execution.delayUntil(() => Bank.loaded() || Bank.items().length > 0, 3000);
+    }
+    await Execution.delayTicks(1);
 }
 
 function chopOp(actions) {
@@ -226,6 +292,8 @@ class OakTreeFletcher extends LoopingBot {
     fletched = 0;
     bankTrips = 0;
     planId = 'logs';
+    gearReady = false;
+    needSteelBuy = false;
 
     async onStart() {
         await Execution.delayUntil(() => Game.ingame() && Game.tile() !== null, 0);
@@ -235,6 +303,8 @@ class OakTreeFletcher extends LoopingBot {
         this.wcXpAtStart = Skills.xp('woodcutting');
         this.fletchXpAtStart = Skills.xp('fletching');
         this.planId = fletchPlan(Skills.level('fletching')).id;
+        this.gearReady = false;
+        this.needSteelBuy = false;
 
         this.on('skill.level', e => {
             if (e.name === 'fletching') {
@@ -244,6 +314,9 @@ class OakTreeFletcher extends LoopingBot {
             }
             if (e.name === 'woodcutting') {
                 this.log(`woodcutting ${e.previous} → ${e.level}`);
+                if (e.previous < 6 && e.level >= 6 && !gearHasSteelOrBetter()) {
+                    this.needSteelBuy = true;
+                }
             }
         });
 
@@ -264,6 +337,15 @@ class OakTreeFletcher extends LoopingBot {
         if (ChatDialog.canContinue()) {
             this.status = 'continue dialog';
             await ChatDialog.continue();
+            return;
+        }
+
+        if (await this.prepWcGear()) {
+            return;
+        }
+
+        if (Shop.isOpen()) {
+            await Shop.close();
             return;
         }
 
@@ -364,6 +446,298 @@ class OakTreeFletcher extends LoopingBot {
                 this.chopped += logCount() - before;
             }
         }
+    }
+
+    maybeQueueSteelBuy() {
+        if (gearHasSteelOrBetter()) {
+            this.needSteelBuy = false;
+            return;
+        }
+        if (Skills.level('woodcutting') < 6) {
+            return;
+        }
+        if (Bank.isOpen() && gearBankCoins() + gearInvCoins() >= GEAR_STEEL_COST) {
+            this.needSteelBuy = true;
+        }
+    }
+
+    /** @returns {Promise<boolean>} true if this loop spent time on gear prep */
+    async prepWcGear() {
+        if (this.gearReady && !this.needSteelBuy) {
+            return false;
+        }
+        if (ChatDialog.isMakeMenu()) {
+            return false;
+        }
+
+        if (this.needSteelBuy && Shop.isOpen()) {
+            return await this.buySteelAtOpenShop();
+        }
+
+        if (Shop.isOpen()) {
+            await Shop.close();
+            return true;
+        }
+
+        if (!this.gearReady) {
+            return await this.bootstrapWcGear();
+        }
+
+        if (this.needSteelBuy) {
+            return await this.runSteelAxeBuy();
+        }
+
+        return false;
+    }
+
+    async bootstrapWcGear() {
+        this.status = 'gear: bank';
+
+        if (!Bank.isOpen()) {
+            this.log('gear: opening bank for best axe / knife');
+            if (!(await Banking.open({ log: m => this.log(`  ${m}`) }))) {
+                this.log('gear: could not open bank — retrying');
+                await Execution.delayTicks(3);
+                return true;
+            }
+        }
+
+        await gearWaitBankLoaded();
+
+        if (Inventory.free() < 2) {
+            await Bank.depositAllMatching(name => {
+                const n = (name ?? '').toLowerCase();
+                if (!n || n === 'coins' || n === 'knife') {
+                    return false;
+                }
+                if (isKeepTool(name)) {
+                    return false;
+                }
+                return true;
+            });
+            await Execution.delayTicks(1);
+        }
+
+        const wc = Skills.level('woodcutting');
+        const best = bestAxe(wc, n => gearAxeCount(n) > 0 || (Bank.count(n) || 0) > 0);
+
+        if (!best) {
+            this.log(`gear: no usable axe in bank/pack for WC ${wc} — waiting`);
+            await Bank.close();
+            await Execution.delayTicks(8);
+            return true;
+        }
+
+        if (gearAxeCount(best) === 0 && (Bank.count(best) || 0) > 0) {
+            this.log(`gear: withdrawing ${best}`);
+            if (!(await Bank.withdrawX(best, 1))) {
+                this.log(`gear: withdraw failed for ${best}`);
+                await Execution.delayTicks(2);
+                return true;
+            }
+            await Execution.delayTicks(1);
+        }
+
+        if (!gearHasKnife()) {
+            if ((Bank.count('Knife') || 0) > 0) {
+                this.log('gear: withdrawing Knife');
+                await Bank.withdrawX('Knife', 1);
+                await Execution.delayTicks(1);
+            } else {
+                this.log('gear: no Knife in bank — will pick up behind Bob');
+            }
+        }
+
+        this.maybeQueueSteelBuy();
+        if (this.needSteelBuy) {
+            const need = GEAR_STEEL_COST - gearInvCoins();
+            if (need > 0) {
+                this.log(`gear: withdrawing ${need}gp for Steel axe`);
+                await Bank.withdrawX('Coins', need);
+                await Execution.delayTicks(1);
+            }
+        }
+
+        await Bank.close();
+        await Execution.delayTicks(1);
+
+        const held = gearBestHeldAxe();
+        if (held && !Equipment.contains(held) && canWieldTool(held, Skills.level('attack'))) {
+            this.status = `gear: wield ${held}`;
+            this.log(`gear: wielding ${held}`);
+            await Equipment.equip(held);
+            await Execution.delayTicks(1);
+        } else if (held && !canWieldTool(held, Skills.level('attack'))) {
+            this.log(`gear: keeping ${held} in pack (Attack too low to wield)`);
+        }
+
+        if (!gearHasKnife()) {
+            return await this.pickupLumbridgeKnife();
+        }
+
+        if (!gearBestHeldAxe()) {
+            this.log('gear: still missing axe after bank');
+            await Execution.delayTicks(5);
+            return true;
+        }
+
+        this.gearReady = true;
+        this.log(
+            `gear: ready — ${gearBestHeldAxe()}` +
+                (this.needSteelBuy ? ' (buying Steel axe next)' : '')
+        );
+
+        if (this.needSteelBuy) {
+            return await this.runSteelAxeBuy();
+        }
+        return true;
+    }
+
+    async pickupLumbridgeKnife() {
+        this.status = 'gear: knife spawn';
+        this.log('gear: walking to Lumbridge knife spawn (behind Bob)');
+        await Traversal.walkResilient(GEAR_KNIFE_SPAWN, {
+            radius: 1,
+            log: m => this.log(`  ${m}`)
+        });
+
+        let ground = GroundItems.query().name('Knife').within(6).nearest();
+        if (!ground) {
+            await Execution.delayTicks(3);
+            ground = GroundItems.query().name('Knife').within(6).nearest();
+        }
+        if (!ground) {
+            this.log('gear: Knife not on ground yet — waiting');
+            await Execution.delayTicks(5);
+            return true;
+        }
+
+        if (Inventory.isFull()) {
+            this.log('gear: inventory full — cannot Take Knife');
+            await Execution.delayTicks(5);
+            return true;
+        }
+
+        this.log('gear: taking Knife');
+        await ground.interact('Take');
+        await Execution.delayUntil(() => gearHasKnife(), 8000);
+
+        if (gearHasKnife() && gearBestHeldAxe()) {
+            this.gearReady = true;
+            this.log('gear: Knife acquired — ready');
+        }
+        return true;
+    }
+
+    async runSteelAxeBuy() {
+        if (gearHasSteelOrBetter()) {
+            this.needSteelBuy = false;
+            return false;
+        }
+        if (Skills.level('woodcutting') < 6) {
+            this.needSteelBuy = false;
+            return false;
+        }
+
+        // Confirm ownership in bank before spending 200gp at Bob.
+        if (!Bank.isOpen()) {
+            this.status = 'gear: check steel';
+            if (!(await Banking.open({ log: m => this.log(`  ${m}`) }))) {
+                await Execution.delayTicks(3);
+                return true;
+            }
+        }
+        await gearWaitBankLoaded();
+
+        if (gearHasSteelOrBetter()) {
+            const steelRank = gearAxeRank(GEAR_STEEL_AXE);
+            const best = bestAxe(
+                Skills.level('woodcutting'),
+                n => gearAxeCount(n) > 0 || (Bank.count(n) || 0) > 0
+            );
+            if (best && gearAxeRank(best) <= steelRank && gearAxeCount(best) === 0) {
+                this.log(`gear: already own ${best} in bank — withdrawing (skip Bob)`);
+                await Bank.withdrawX(best, 1);
+                await Execution.delayTicks(1);
+            } else {
+                this.log('gear: already own steel+ axe — skip Bob');
+            }
+            this.needSteelBuy = false;
+            await Bank.close();
+            const held = gearBestHeldAxe();
+            if (held && !Equipment.contains(held) && canWieldTool(held, Skills.level('attack'))) {
+                await Equipment.equip(held);
+            }
+            return true;
+        }
+
+        if (gearInvCoins() < GEAR_STEEL_COST) {
+            this.status = 'gear: steel gp';
+            if (gearBankCoins() + gearInvCoins() < GEAR_STEEL_COST) {
+                this.log('gear: need 200gp in bank for Steel axe — waiting');
+                this.needSteelBuy = false;
+                await Bank.close();
+                return true;
+            }
+            const need = GEAR_STEEL_COST - gearInvCoins();
+            if (need > 0) {
+                await Bank.withdrawX('Coins', need);
+            }
+            await Bank.close();
+            await Execution.delayTicks(1);
+            return true;
+        }
+
+        await Bank.close();
+        await Execution.delayTicks(1);
+
+        this.status = 'gear: Bob';
+        this.log('gear: walking to Bob for Steel axe');
+        await Traversal.walkResilient(GEAR_BOB_STAND, {
+            radius: 2,
+            log: m => this.log(`  ${m}`)
+        });
+
+        if (!(await Shop.open('Bob'))) {
+            this.log("gear: could not open Bob's shop");
+            await Execution.delayTicks(3);
+            return true;
+        }
+        return await this.buySteelAtOpenShop();
+    }
+
+    async buySteelAtOpenShop() {
+        if (gearHasSteelOrBetter()) {
+            this.log('gear: already own steel+ axe — closing Bob');
+            this.needSteelBuy = false;
+            await Shop.close();
+            return true;
+        }
+
+        this.status = 'gear: buy steel';
+        const before = gearAxeCount(GEAR_STEEL_AXE);
+        const bought = await Shop.buy(GEAR_STEEL_AXE, 1);
+        const got = bought > 0 ? bought : Math.max(0, gearAxeCount(GEAR_STEEL_AXE) - before);
+
+        if (got <= 0) {
+            this.log('gear: Steel axe buy failed (stock/coins?)');
+            await Shop.close();
+            await Execution.delayTicks(5);
+            return true;
+        }
+
+        this.log('gear: bought Steel axe from Bob');
+        this.needSteelBuy = false;
+        await Shop.close();
+        await Execution.delayTicks(1);
+
+        if (
+            !Equipment.contains(GEAR_STEEL_AXE) &&
+            canWieldTool(GEAR_STEEL_AXE, Skills.level('attack'))
+        ) {
+            await Equipment.equip(GEAR_STEEL_AXE);
+        }
+        return true;
     }
 
     findTree() {
@@ -517,6 +891,9 @@ class OakTreeFletcher extends LoopingBot {
                     return true;
                 }
                 return isOakLog(name);
+            },
+            afterDeposit: () => {
+                this.maybeQueueSteelBuy();
             },
             returnTo: ANCHOR,
             log: m => this.log(`  ${m}`)
