@@ -53,7 +53,7 @@ const LONGBOW_LEVEL = 25;
 const GEAR_KNIFE_SPAWN = new Tile(3224, 3202, 0);
 const GEAR_BOB_STAND = new Tile(3231, 3203, 0);
 const GEAR_STEEL_AXE = 'Steel axe';
-const GEAR_STEEL_COST = 200;
+const GEAR_STEEL_COST = 250;
 const GEAR_BROKEN_AXE = 'Broken axe';
 const GEAR_REPAIR_PREFER = ['repair', 'fix', 'fix my', 'yes'];
 const GEAR_REPAIR_COIN_FLOAT = 100;
@@ -817,7 +817,7 @@ class OakTreeFletcher extends LoopingBot {
             return false;
         }
 
-        // Confirm ownership in bank before spending 200gp at Bob.
+        // Confirm ownership in bank before spending at Bob (need 250gp float).
         if (!Bank.isOpen()) {
             this.status = 'gear: check steel';
             if (!(await Banking.open({ log: m => this.log(`  ${m}`) }))) {
@@ -852,7 +852,7 @@ class OakTreeFletcher extends LoopingBot {
         if (gearInvCoins() < GEAR_STEEL_COST) {
             this.status = 'gear: steel gp';
             if (gearBankCoins() + gearInvCoins() < GEAR_STEEL_COST) {
-                this.log('gear: need 200gp in bank for Steel axe — waiting');
+                this.log('gear: need 250gp in bank for Steel axe — waiting');
                 this.needSteelBuy = false;
                 await Bank.close();
                 return true;
