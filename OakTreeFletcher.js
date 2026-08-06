@@ -21,6 +21,7 @@ const {
     Game,
     LoopingBot,
     Locs,
+    Npcs,
     GroundItems,
     Inventory,
     Equipment,
@@ -48,15 +49,19 @@ const LOG_NAME = 'Oak logs';
 const SHORTBOW_LEVEL = 20;
 const LONGBOW_LEVEL = 25;
 
-/** Lumbridge knife spawn (behind Bob's) + Bob steel axe. */
+/** Lumbridge knife spawn (behind Bob's) + Bob steel axe / repair. */
 const GEAR_KNIFE_SPAWN = new Tile(3224, 3202, 0);
 const GEAR_BOB_STAND = new Tile(3231, 3203, 0);
 const GEAR_STEEL_AXE = 'Steel axe';
 const GEAR_STEEL_COST = 200;
+const GEAR_BROKEN_AXE = 'Broken axe';
+const GEAR_REPAIR_PREFER = ['repair', 'fix', 'fix my', 'yes'];
+const GEAR_REPAIR_COIN_FLOAT = 100;
 
 /** Always keep these when banking (never deposit). */
 const KEEP_TOOLS = [
     'knife',
+    'broken axe',
     'bronze axe',
     'iron axe',
     'steel axe',
@@ -133,6 +138,52 @@ function gearHasSteelOrBetter() {
         }
     }
     return false;
+}
+
+function gearHasBrokenAxe() {
+    return (
+        Equipment.contains(GEAR_BROKEN_AXE) ||
+        (Inventory.count(GEAR_BROKEN_AXE) || 0) > 0 ||
+        Inventory.items().some(i => (i.name ?? '').toLowerCase() === 'broken axe')
+    );
+}
+
+function gearPickRepairOption(options) {
+    for (const p of GEAR_REPAIR_PREFER) {
+        const hit = options.find(o => (o ?? '').toLowerCase().includes(p.toLowerCase()));
+        if (hit) {
+            return hit;
+        }
+    }
+    return options.length > 0 ? options[options.length - 1] : null;
+}
+
+async function gearDriveRepairDialog(log) {
+    for (let i = 0; i < 80; i++) {
+        if (!ChatDialog.isOpen() && !ChatDialog.canContinue()) {
+            if (!(await Execution.delayUntil(() => ChatDialog.isOpen() || ChatDialog.canContinue(), 1500))) {
+                break;
+            }
+        }
+        if (ChatDialog.canContinue()) {
+            await ChatDialog.continue();
+            await Execution.delayTicks(1);
+            continue;
+        }
+        const opts = typeof ChatDialog.options === 'function' ? ChatDialog.options() : [];
+        if (opts.length > 0) {
+            const pick = gearPickRepairOption(opts);
+            if (!pick) {
+                log(`gear: no repair option in [${opts.join(' | ')}]`);
+                return false;
+            }
+            await ChatDialog.chooseOption(pick);
+            await Execution.delayTicks(2);
+            continue;
+        }
+        await Execution.delayTicks(1);
+    }
+    return !ChatDialog.isOpen();
 }
 
 async function gearWaitBankLoaded() {
@@ -461,12 +512,129 @@ class OakTreeFletcher extends LoopingBot {
         }
     }
 
+    /**
+     * Use Broken axe on Bob and drive the repair dialogue.
+     * @returns {Promise<boolean>} always true (spent this loop on repair)
+     */
+    async repairBrokenAxeAtBob() {
+        this.status = 'gear: repair';
+
+        if (Shop.isOpen()) {
+            await Shop.close();
+            return true;
+        }
+
+        if (Equipment.contains(GEAR_BROKEN_AXE) && !Inventory.isFull()) {
+            this.log('gear: unequipping Broken axe');
+            await Equipment.unequip(GEAR_BROKEN_AXE);
+            await Execution.delayTicks(1);
+        }
+
+        if (!gearHasBrokenAxe()) {
+            if (!Bank.isOpen()) {
+                if (!(await Banking.open({ log: m => this.log(`  ${m}`) }))) {
+                    await Execution.delayTicks(3);
+                    return true;
+                }
+            }
+            await gearWaitBankLoaded();
+            if ((Bank.count(GEAR_BROKEN_AXE) || 0) > 0) {
+                this.log('gear: withdrawing Broken axe from bank');
+                await Bank.withdrawX(GEAR_BROKEN_AXE, 1);
+                await Execution.delayTicks(1);
+            } else {
+                await Bank.close();
+                return true;
+            }
+        }
+
+        if (gearInvCoins() < GEAR_REPAIR_COIN_FLOAT) {
+            if (!Bank.isOpen()) {
+                if (!(await Banking.open({ log: m => this.log(`  ${m}`) }))) {
+                    this.log('gear: could not open bank for repair coins — trying Bob anyway');
+                }
+            }
+            if (Bank.isOpen()) {
+                await gearWaitBankLoaded();
+                const need = GEAR_REPAIR_COIN_FLOAT - gearInvCoins();
+                const have = gearBankCoins();
+                if (need > 0 && have > 0) {
+                    await Bank.withdrawX('Coins', Math.min(need, have));
+                    await Execution.delayTicks(1);
+                }
+                await Bank.close();
+                await Execution.delayTicks(1);
+            }
+        } else if (Bank.isOpen()) {
+            await Bank.close();
+            await Execution.delayTicks(1);
+        }
+
+        const broken = Inventory.first(GEAR_BROKEN_AXE);
+        if (!broken) {
+            this.log('gear: Broken axe not in pack after prep');
+            await Execution.delayTicks(3);
+            return true;
+        }
+
+        this.log('gear: walking to Bob to repair Broken axe');
+        await Traversal.walkResilient(GEAR_BOB_STAND, {
+            radius: 2,
+            log: m => this.log(`  ${m}`)
+        });
+
+        const bob = Npcs.query().name('Bob').within(12).nearest();
+        if (!bob) {
+            this.log('gear: Bob not nearby — retrying');
+            await Execution.delayTicks(3);
+            return true;
+        }
+
+        const before = Inventory.count(GEAR_BROKEN_AXE) || 0;
+        this.log('gear: using Broken axe on Bob');
+        if (!(await broken.useOn(bob))) {
+            this.log('gear: use-on Bob failed');
+            await Execution.delayTicks(2);
+            return true;
+        }
+
+        if (!(await Execution.delayUntil(() => ChatDialog.isOpen() || ChatDialog.canContinue(), 8000))) {
+            this.log('gear: Bob never opened repair dialogue');
+            await Execution.delayTicks(3);
+            return true;
+        }
+
+        await gearDriveRepairDialog(m => this.log(m));
+        await Execution.delayTicks(2);
+
+        const after = Inventory.count(GEAR_BROKEN_AXE) || 0;
+        if (after < before || !gearHasBrokenAxe()) {
+            this.log('gear: axe repaired at Bob');
+            const held = gearBestHeldAxe();
+            if (held && !Equipment.contains(held) && canWieldTool(held, Skills.level('attack'))) {
+                await Equipment.equip(held);
+            }
+            if (!gearBestHeldAxe() || !gearHasKnife()) {
+                this.gearReady = false;
+            }
+        } else {
+            this.log('gear: Bob did not repair — will retry');
+        }
+        return true;
+    }
+
     /** @returns {Promise<boolean>} true if this loop spent time on gear prep */
     async prepWcGear() {
-        if (this.gearReady && !this.needSteelBuy) {
+        if (ChatDialog.isMakeMenu()) {
             return false;
         }
-        if (ChatDialog.isMakeMenu()) {
+
+        // Broken axe always wins — take it to Bob before anything else.
+        if (gearHasBrokenAxe() || (Bank.isOpen() && (Bank.count(GEAR_BROKEN_AXE) || 0) > 0)) {
+            return await this.repairBrokenAxeAtBob();
+        }
+
+        if (this.gearReady && !this.needSteelBuy) {
             return false;
         }
 
@@ -548,6 +716,12 @@ class OakTreeFletcher extends LoopingBot {
             }
         }
 
+        if ((Bank.count(GEAR_BROKEN_AXE) || 0) > 0 && !gearHasBrokenAxe()) {
+            this.log('gear: withdrawing Broken axe');
+            await Bank.withdrawX(GEAR_BROKEN_AXE, 1);
+            await Execution.delayTicks(1);
+        }
+
         this.maybeQueueSteelBuy();
         if (this.needSteelBuy) {
             const need = GEAR_STEEL_COST - gearInvCoins();
@@ -560,6 +734,10 @@ class OakTreeFletcher extends LoopingBot {
 
         await Bank.close();
         await Execution.delayTicks(1);
+
+        if (gearHasBrokenAxe()) {
+            return await this.repairBrokenAxeAtBob();
+        }
 
         const held = gearBestHeldAxe();
         if (held && !Equipment.contains(held) && canWieldTool(held, Skills.level('attack'))) {
@@ -892,7 +1070,11 @@ class OakTreeFletcher extends LoopingBot {
                 }
                 return isOakLog(name);
             },
-            afterDeposit: () => {
+            afterDeposit: async () => {
+                if ((Bank.count(GEAR_BROKEN_AXE) || 0) > 0 && !gearHasBrokenAxe()) {
+                    this.log('gear: withdrawing Broken axe');
+                    await Bank.withdrawX(GEAR_BROKEN_AXE, 1);
+                }
                 this.maybeQueueSteelBuy();
             },
             returnTo: ANCHOR,
