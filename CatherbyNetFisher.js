@@ -172,17 +172,17 @@ function isBankableFish(name) {
     return isRawShrimpFish(name) || isCookedShrimpFish(name) || isBurntFish(name);
 }
 
-/** Cooking level required to cook each raw (OSRS / classic). */
+/**
+ * Cooking level to cook each raw (not fishing level).
+ * Anchovies: Fishing 15 to catch, Cooking 1 to cook. Shrimp: Fishing 1 / Cooking 1.
+ */
 const COOK_LEVEL = {
     shrimp: 1,
     anchovy: 1
 };
 
-function rawFishKind(name) {
+function fishKind(name) {
     const n = (name ?? '').toLowerCase();
-    if (!n.startsWith('raw ')) {
-        return null;
-    }
     if (n.includes('anchov')) {
         return 'anchovy';
     }
@@ -190,6 +190,14 @@ function rawFishKind(name) {
         return 'shrimp';
     }
     return null;
+}
+
+function rawFishKind(name) {
+    const n = (name ?? '').toLowerCase();
+    if (!n.startsWith('raw ')) {
+        return null;
+    }
+    return fishKind(n);
 }
 
 function canCookRaw(name) {
@@ -422,7 +430,7 @@ class CatherbyNetFisher extends LoopingBot {
 
         if (ChatDialog.isMakeMenu()) {
             await this.chooseCookProduct();
-            if (rawFishCount() === 0 && (cookedFishCount() > 0 || burntCount() > 0)) {
+            if (cookableCount() === 0 && (cookedFishCount() > 0 || burntCount() > 0 || rawFishCount() > 0)) {
                 if (burntCount() > 0) {
                     await this.dropBurnt();
                 }
@@ -443,26 +451,28 @@ class CatherbyNetFisher extends LoopingBot {
             return;
         }
 
-        if (this.cookingLoad && rawFishCount() > 0) {
+        if (this.cookingLoad && cookableCount() > 0) {
             await this.cookLoad();
             return;
         }
 
-        if (this.cookingLoad && rawFishCount() === 0) {
+        if (this.cookingLoad && cookableCount() === 0) {
             if (burntCount() > 0) {
                 await this.dropBurnt();
             }
             this.cookingLoad = false;
-            if (cookedFishCount() > 0 || burntCount() > 0) {
+            if (cookedFishCount() > 0 || burntCount() > 0 || rawFishCount() > 0) {
                 await this.bankAndReturn();
             }
             return;
         }
 
         if (Inventory.isFull()) {
-            if (this.cookOnWay && rawFishCount() > 0) {
+            if (this.cookOnWay && cookableCount() > 0) {
                 this.cookingLoad = true;
-                this.log(`full inv (${rawFishCount()} raw) — cooking on way to bank`);
+                this.log(
+                    `full inv (${cookableCount()} cookable / ${rawFishCount()} raw) — cooking on way to bank`
+                );
                 await this.cookLoad();
                 return;
             }
@@ -607,14 +617,22 @@ class CatherbyNetFisher extends LoopingBot {
 
     async chooseCookProduct() {
         const products = ChatDialog.makeProducts();
-        const raw = lastRawFish();
-        const hint = raw?.name;
+        const raw = lastCookableRaw();
+        const hint = matchCookProduct(products, raw?.name);
+        const kind = fishKind(hint) || fishKind(raw?.name);
+        const frag = kind === 'anchovy' ? 'anchov' : kind === 'shrimp' ? 'shrimp' : null;
+        const batch = frag
+            ? Math.max(1, Math.min(countCookableNamed(frag), 28))
+            : Math.max(1, Math.min(cookableCount(), 28));
         this.status = 'cook make-menu';
-        this.log(`cook menu: [${products.join(', ')}] hint=${hint ?? 'none'}`);
+        this.log(
+            `cook menu: [${products.join(', ')}] pick=${hint ?? 'none'} x${batch}` +
+                ` (cook ${Skills.level('cooking')})`
+        );
 
         let picked = false;
         if (hint && typeof ChatDialog.makeX === 'function') {
-            picked = await ChatDialog.makeX(hint, Math.max(1, Math.min(rawFishCount(), 28)));
+            picked = await ChatDialog.makeX(hint, batch);
         }
         if (!picked && hint) {
             picked = await ChatDialog.make(hint);
@@ -628,14 +646,17 @@ class CatherbyNetFisher extends LoopingBot {
             return;
         }
 
+        const stillThisType = () =>
+            frag ? countCookableNamed(frag) > 0 : cookableCount() > 0;
+
         await Execution.delayUntil(
-            () => !ChatDialog.isMakeMenu() && (Game.animating() || rawFishCount() === 0),
+            () => !ChatDialog.isMakeMenu() && (Game.animating() || !stillThisType()),
             5000
         );
 
         let cookedMark = cookedFishCount();
         let idle = 0;
-        for (let guard = 0; guard < 400 && rawFishCount() > 0; guard++) {
+        for (let guard = 0; guard < 400 && stillThisType(); guard++) {
             if (ChatDialog.canContinue() || ChatDialog.isMakeMenu()) {
                 this.noteCooked(cookedMark);
                 return;
@@ -654,7 +675,7 @@ class CatherbyNetFisher extends LoopingBot {
     }
 
     async cookLoad() {
-        if (rawFishCount() === 0) {
+        if (cookableCount() === 0) {
             this.cookingLoad = false;
             return;
         }
@@ -674,7 +695,7 @@ class CatherbyNetFisher extends LoopingBot {
 
         if (ChatDialog.isMakeMenu()) {
             await this.chooseCookProduct();
-            if (rawFishCount() === 0) {
+            if (cookableCount() === 0) {
                 if (burntCount() > 0) {
                     await this.dropBurnt();
                 }
@@ -684,17 +705,20 @@ class CatherbyNetFisher extends LoopingBot {
             return;
         }
 
-        const raw = lastRawFish();
+        const raw = lastCookableRaw();
         if (!raw) {
             this.cookingLoad = false;
             return;
         }
 
-        const beforeRaw = rawFishCount();
+        const beforeCookable = cookableCount();
         let cookedMark = cookedFishCount();
         const beforeXp = Skills.xp('cooking');
         this.status = `cooking ${raw.name}`;
-        this.log(`use ${raw.name} on ${oven.name ?? 'Range'}`);
+        this.log(
+            `use ${raw.name} on ${oven.name ?? 'Range'} ` +
+                `(${beforeCookable} cookable, cook lvl ${Skills.level('cooking')})`
+        );
 
         if (!(await raw.useOn(oven))) {
             await this.openNearbyDoor();
@@ -704,7 +728,7 @@ class CatherbyNetFisher extends LoopingBot {
 
         const started = await Execution.delayUntil(
             () =>
-                rawFishCount() < beforeRaw ||
+                cookableCount() < beforeCookable ||
                 Skills.xp('cooking') > beforeXp ||
                 ChatDialog.isMakeMenu() ||
                 ChatDialog.canContinue(),
@@ -713,7 +737,7 @@ class CatherbyNetFisher extends LoopingBot {
 
         if (ChatDialog.isMakeMenu()) {
             await this.chooseCookProduct();
-            if (rawFishCount() === 0) {
+            if (cookableCount() === 0) {
                 if (burntCount() > 0) {
                     await this.dropBurnt();
                 }
@@ -723,15 +747,16 @@ class CatherbyNetFisher extends LoopingBot {
             return;
         }
 
-        if (!started && rawFishCount() >= beforeRaw) {
+        if (!started && cookableCount() >= beforeCookable) {
             this.log('cook did not start — re-pathing to range');
             await this.walkToRange();
             return;
         }
 
-        let mark = rawFishCount();
+        let mark = cookableCount();
         let idle = 0;
-        for (let guard = 0; guard < 400 && rawFishCount() > 0; guard++) {
+        // Finish current batch; if another cookable type remains (e.g. anchovies after shrimp), loop continues.
+        for (let guard = 0; guard < 400 && cookableCount() > 0; guard++) {
             if (ChatDialog.canContinue() || ChatDialog.isMakeMenu()) {
                 this.noteCooked(cookedMark);
                 return;
@@ -740,7 +765,7 @@ class CatherbyNetFisher extends LoopingBot {
             if (this.noteCooked(cookedMark) > 0) {
                 cookedMark = cookedFishCount();
             }
-            const now = rawFishCount();
+            const now = cookableCount();
             if (now < mark) {
                 mark = now;
                 idle = 0;
@@ -753,7 +778,7 @@ class CatherbyNetFisher extends LoopingBot {
 
         this.noteCooked(cookedMark);
 
-        if (rawFishCount() === 0) {
+        if (cookableCount() === 0) {
             if (burntCount() > 0) {
                 await this.dropBurnt();
             }
