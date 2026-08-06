@@ -25,7 +25,8 @@ const {
     Inventory,
     Traversal,
     Tile,
-    Skills
+    Skills,
+    ChatDialog
 } = abi;
 
 const SCRIPT_NAME = 'LumbridgeGoblinKiller';
@@ -62,6 +63,10 @@ function isShutDoor(loc) {
 
 function openDoorOp(loc) {
     return loc.actions().find(a => /^open/i.test(a)) ?? null;
+}
+
+function npcTargetsMe(n) {
+    return typeof n.targetsMe === 'function' && !!n.targetsMe();
 }
 
 function fmtXph(n) {
@@ -272,6 +277,26 @@ class LumbridgeGoblinKiller extends LoopingBot {
             return;
         }
 
+        // Clear leftover random-event / dwarf dialog before combat clicks.
+        if (typeof ChatDialog !== 'undefined' && ChatDialog) {
+            if (ChatDialog.canContinue()) {
+                this.status = 'continue dialog';
+                await ChatDialog.continue();
+                return;
+            }
+            if (
+                typeof ChatDialog.isOpen === 'function' &&
+                ChatDialog.isOpen() &&
+                typeof ChatDialog.options === 'function' &&
+                ChatDialog.options().length > 0 &&
+                typeof ChatDialog.chooseOption === 'function'
+            ) {
+                this.status = 'dialog option';
+                await ChatDialog.chooseOption();
+                return;
+            }
+        }
+
         if (await this.ensureGear()) {
             return;
         }
@@ -303,19 +328,21 @@ class LumbridgeGoblinKiller extends LoopingBot {
             return;
         }
 
+        // Only idle in combat when a goblin is actually on us. After random events
+        // (Drunken Dwarf, etc.) the combat flag can linger / drop without a target —
+        // fall through and Attack again.
         if (Game.inCombat()) {
-            this.status = 'in combat';
-            await Execution.delayTicks(2);
-            return;
+            const onMe = this.findGoblinFightingMe();
+            if (onMe) {
+                this.status = 'in combat';
+                await Execution.delayTicks(2);
+                return;
+            }
+            this.status = 're-engaging';
+            this.log('combat interrupted (e.g. random event) — re-engaging a goblin');
         }
 
-        const goblin = Npcs.query()
-            .name('Goblin')
-            .action('Attack')
-            .within(LEASH + 4)
-            .where(n => !n.inCombat)
-            .nearest();
-
+        const goblin = this.findAttackableGoblin();
         if (!goblin) {
             this.status = 'waiting for goblin';
             await Traversal.walkTo(GOBLIN_SPOT, { radius: 2, timeoutMs: 8_000 });
@@ -447,9 +474,12 @@ class LumbridgeGoblinKiller extends LoopingBot {
         this.log(`attacking Goblin @ ${targetTile.x},${targetTile.z}`);
         this.cantReach = false;
         await goblin.interact('Attack');
-        await Execution.delayUntil(() => Game.inCombat() || this.cantReach, 4000);
+        await Execution.delayUntil(
+            () => Game.inCombat() || this.cantReach || this.findGoblinFightingMe() !== null,
+            4000
+        );
 
-        if (Game.inCombat()) {
+        if (Game.inCombat() || this.findGoblinFightingMe()) {
             this.attacks++;
             return;
         }
@@ -474,13 +504,7 @@ class LumbridgeGoblinKiller extends LoopingBot {
         const again =
             Npcs.query()
                 .where(n => n.index === index)
-                .nearest() ??
-            Npcs.query()
-                .name('Goblin')
-                .action('Attack')
-                .within(LEASH + 4)
-                .where(n => !n.inCombat)
-                .nearest();
+                .nearest() ?? this.findAttackableGoblin();
 
         if (!again) {
             this.log('goblin gone after opening door');
@@ -491,11 +515,41 @@ class LumbridgeGoblinKiller extends LoopingBot {
         this.log(`retrying Goblin @ ${again.tile().x},${again.tile().z}`);
         this.cantReach = false;
         await again.interact('Attack');
-        if (await Execution.delayUntil(() => Game.inCombat() || this.cantReach, 4000)) {
-            if (Game.inCombat()) {
+        if (
+            await Execution.delayUntil(
+                () => Game.inCombat() || this.cantReach || this.findGoblinFightingMe() !== null,
+                4000
+            )
+        ) {
+            if (Game.inCombat() || this.findGoblinFightingMe()) {
                 this.attacks++;
             }
         }
+    }
+
+    /** Goblin currently targeting the player (real fight, not a stale combat flag). */
+    findGoblinFightingMe() {
+        return Npcs.query()
+            .name('Goblin')
+            .within(LEASH + 6)
+            .where(n => npcTargetsMe(n))
+            .nearest();
+    }
+
+    /**
+     * Prefer the goblin already on us (re-engage after random events), else a free one.
+     */
+    findAttackableGoblin() {
+        const onMe = this.findGoblinFightingMe();
+        if (onMe) {
+            return onMe;
+        }
+        return Npcs.query()
+            .name('Goblin')
+            .action('Attack')
+            .within(LEASH + 4)
+            .where(n => !n.inCombat || npcTargetsMe(n))
+            .nearest();
     }
 
     findShutDoorToward(toward) {
@@ -708,11 +762,11 @@ class LumbridgeGoblinKiller extends LoopingBot {
 
 export default defineBot({
     name: SCRIPT_NAME,
-    version: '1.3.0',
+    version: '1.4.0',
     category: 'Combat',
     tags: ['goblin', 'lumbridge', 'melee', 'death-recovery', 'xp', 'prayer'],
     description:
-        'Lumbridge goblins until death; door-aware attacks; optional bone bury + auto-lowest combat training',
+        'Lumbridge goblins until death; re-engages after random events; door-aware attacks; optional bone bury + auto-lowest combat training',
     settingsSchema: {
         buryBones: {
             type: 'boolean',
