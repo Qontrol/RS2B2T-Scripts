@@ -257,6 +257,8 @@ class OakTreeFletcherSell extends LoopingBot {
     sellTrips = 0;
     bankTrips = 0;
     soldBows = 0;
+    /** Last known Coins stack in the bank (updated after each GP deposit). */
+    totalGpEarned = 0;
     planId = 'logs';
 
     async onStart() {
@@ -266,6 +268,7 @@ class OakTreeFletcherSell extends LoopingBot {
         this.startedAt = Date.now();
         this.wcXpAtStart = Skills.xp('woodcutting');
         this.fletchXpAtStart = Skills.xp('fletching');
+        this.totalGpEarned = 0;
         this.planId = fletchPlan(Skills.level('fletching')).id;
 
         this.on('skill.level', e => {
@@ -610,12 +613,29 @@ class OakTreeFletcherSell extends LoopingBot {
                 }
                 return isOakLog(name);
             },
+            afterDeposit: async () => {
+                await this.refreshBankGp();
+            },
             returnTo: ANCHOR,
             log: m => this.log(`  ${m}`)
         });
 
         this.bankTrips++;
         this.status = 'returning to oaks';
+    }
+
+    /** Read Coins currently stored in the open bank → totalGpEarned. */
+    async refreshBankGp() {
+        if (!Bank.isOpen()) {
+            return;
+        }
+        if (typeof Bank.loaded === 'function') {
+            await Execution.delayUntil(() => Bank.loaded() || Bank.count('Coins') > 0, 2500);
+        }
+        await Execution.delayTicks(1);
+        const bankCoins = Bank.count('Coins');
+        this.totalGpEarned = bankCoins;
+        this.log(`bank GP: ${bankCoins}`);
     }
 
     /** Below fletching 20: deposit oak logs only. */
@@ -642,7 +662,7 @@ class OakTreeFletcherSell extends LoopingBot {
     onStop() {
         this.log(
             `stopped — chopped ~${this.chopped}, fletched ~${this.fletched}, ` +
-                `sold ~${this.soldBows}, sell trips ${this.sellTrips}, ` +
+                `sold ~${this.soldBows}, bank GP ${this.totalGpEarned}, sell trips ${this.sellTrips}, ` +
                 `bank trips ${this.bankTrips} (${this.status})`
         );
     }
@@ -660,7 +680,7 @@ class OakTreeFletcherSell extends LoopingBot {
             `OakSell  WC ${Skills.level('woodcutting')}  Fletch ${Skills.level('fletching')}`,
             `time ${fmtElapsed(elapsed)}  ·  ${plan.label}${plan.sell ? ' → store+bank GP' : ' + bank'}  ·  ${this.status}`,
             `logs ${logCount()}  bows ${bowCount()}  sold ${this.soldBows}  trips ${this.sellTrips}`,
-            `WC ${fmtXph(wcXph)}/hr  Fletch ${fmtXph(flXph)}/hr`
+            `GP earned ${fmtXph(this.totalGpEarned)} (in bank)  ·  WC ${fmtXph(wcXph)}/hr  Fletch ${fmtXph(flXph)}/hr`
         ];
 
         ctx.font = '12px monospace';

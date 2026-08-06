@@ -343,7 +343,7 @@ class ProgressiveWcFletcher extends LoopingBot {
     bankTrips = 0;
     sellTrips = 0;
     soldBows = 0;
-    /** Coins gained from shop sells this session (before banking). */
+    /** Last known Coins stack in the bank (updated after each GP deposit). */
     totalGpEarned = 0;
     planId = 'shafts';
 
@@ -643,7 +643,6 @@ class ProgressiveWcFletcher extends LoopingBot {
     async sellOakBowsBankGpAndReturn() {
         const bows = oakBowCount();
         const shorts = countPred(isOakShortbow);
-        const coinsBefore = coinCount();
         this.status = 'walking to Varrock store';
         this.log(
             `selling` +
@@ -695,13 +694,6 @@ class ProgressiveWcFletcher extends LoopingBot {
         this.soldBows += sold;
         this.sellTrips++;
 
-        const coinsAfter = coinCount();
-        const earned = Math.max(0, coinsAfter - coinsBefore);
-        if (earned > 0) {
-            this.totalGpEarned += earned;
-            this.log(`+${earned} gp this trip (session ${this.totalGpEarned} gp)`);
-        }
-
         if (oakBowCount() > 0) {
             this.log(`WARNING: still holding ${oakBowCount()} oak bows — will retry`);
             await Execution.delayTicks(3);
@@ -720,12 +712,29 @@ class ProgressiveWcFletcher extends LoopingBot {
                 }
                 return isCoins(name) || isOakBow(name) || isOakLog(name);
             },
+            afterDeposit: async () => {
+                await this.refreshBankGp();
+            },
             returnTo: OAK_ANCHOR,
             log: m => this.log(`  ${m}`)
         });
 
         this.bankTrips++;
         this.status = 'returning to oaks';
+    }
+
+    /** Read Coins currently stored in the open bank → totalGpEarned. */
+    async refreshBankGp() {
+        if (!Bank.isOpen()) {
+            return;
+        }
+        if (typeof Bank.loaded === 'function') {
+            await Execution.delayUntil(() => Bank.loaded() || Bank.count('Coins') > 0, 2500);
+        }
+        await Execution.delayTicks(1);
+        const bankCoins = Bank.count('Coins');
+        this.totalGpEarned = bankCoins;
+        this.log(`bank GP: ${bankCoins}`);
     }
 
     /* ═══════════ Shared chop / fletch ═══════════ */
@@ -887,7 +896,7 @@ class ProgressiveWcFletcher extends LoopingBot {
     onStop() {
         this.log(
             `stopped — phase ${this.phase}, chopped ~${this.chopped}, fletched ~${this.fletched}, ` +
-                `sold ~${this.soldBows}, gp earned ${this.totalGpEarned}, ` +
+                `sold ~${this.soldBows}, bank GP ${this.totalGpEarned}, ` +
                 `sell ${this.sellTrips}, bank ${this.bankTrips} (${this.status})`
         );
     }
@@ -899,7 +908,6 @@ class ProgressiveWcFletcher extends LoopingBot {
         const flXp = Skills.xp('fletching') - this.fletchXpAtStart;
         const wcXph = hrs > 0.008 ? wcXp / hrs : 0;
         const flXph = hrs > 0.008 ? flXp / hrs : 0;
-        const gpPh = hrs > 0.008 ? this.totalGpEarned / hrs : 0;
         const wc = Skills.level('woodcutting');
         const fl = Skills.level('fletching');
 
@@ -916,7 +924,7 @@ class ProgressiveWcFletcher extends LoopingBot {
             this.phase === 'oak'
                 ? `oak logs ${oakLogCount()}  bows ${oakBowCount()}  sold ${this.soldBows}`
                 : `logs ${faladorLogCount()}  bows ${faladorBowCount()}  shafts ${shaftCount()}`,
-            `GP ${fmtXph(this.totalGpEarned)} earned (${fmtXph(gpPh)}/hr)  ·  bank ${this.bankTrips}`,
+            `GP earned ${fmtXph(this.totalGpEarned)} (in bank)  ·  bank trips ${this.bankTrips}`,
             `WC ${fmtXph(wcXph)}/hr  Fletch ${fmtXph(flXph)}/hr`
         ];
 
