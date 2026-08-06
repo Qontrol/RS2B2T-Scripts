@@ -79,6 +79,18 @@ function fmtXph(n) {
     return String(Math.round(n));
 }
 
+/** Elapsed session time as H:MM:SS or M:SS. */
+function fmtElapsed(ms) {
+    const totalSec = Math.max(0, Math.floor(ms / 1000));
+    const h = Math.floor(totalSec / 3600);
+    const m = Math.floor((totalSec % 3600) / 60);
+    const s = totalSec % 60;
+    if (h > 0) {
+        return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    }
+    return `${m}:${String(s).padStart(2, '0')}`;
+}
+
 function pickLowestStyle() {
     let best = TRAINABLE[0];
     let bestLevel = Skills.level(best);
@@ -363,9 +375,10 @@ class LumbridgeGoblinKiller extends LoopingBot {
     }
 
     onPaint(ctx) {
+        const elapsed = Date.now() - this.startedAt;
         const lines = [
-            `GoblinKiller  ${this.desiredStyle}  atk ${this.attacks}  deaths ${this.deaths}`,
-            this.status
+            `Benzyme's Goblin Killer v1.0  ${this.desiredStyle}  atk ${this.attacks}  deaths ${this.deaths}`,
+            `time ${fmtElapsed(elapsed)}  ·  ${this.status}`
         ];
 
         if (this.buryBones) {
@@ -379,7 +392,7 @@ class LumbridgeGoblinKiller extends LoopingBot {
             );
         }
 
-        const hrs = (Date.now() - this.startedAt) / 3_600_000;
+        const hrs = elapsed / 3_600_000;
         for (const skill of COMBAT_TRACK) {
             if (!this.usedSkills.has(skill)) {
                 continue;
@@ -388,6 +401,8 @@ class LumbridgeGoblinKiller extends LoopingBot {
             const xph = hrs > 0.0005 ? gained / hrs : 0;
             lines.push(`${skill}: ${fmtXph(xph)} xp/hr  (+${Math.round(gained)} xp)`);
         }
+
+        lines.push('CAUTION: ONLY DETECTS BRONZE SWORD AND WOODEN SHIELD.');
 
         ctx.font = '12px monospace';
         let maxW = 0;
@@ -399,8 +414,9 @@ class LumbridgeGoblinKiller extends LoopingBot {
         const boxH = pad * 2 + lines.length * lineH;
         ctx.fillStyle = 'rgba(0,0,0,0.55)';
         ctx.fillRect(6, 6, maxW + pad * 2, boxH);
-        ctx.fillStyle = '#9dce6a';
         lines.forEach((line, i) => {
+            const isCaution = i === lines.length - 1;
+            ctx.fillStyle = isCaution ? '#e8b84a' : '#9dce6a';
             ctx.fillText(line, 6 + pad, 6 + pad + (i + 1) * lineH - 4);
         });
     }
@@ -537,7 +553,8 @@ class LumbridgeGoblinKiller extends LoopingBot {
     }
 
     /**
-     * Prefer the goblin already on us (re-engage after random events), else a free one.
+     * Prefer the goblin already on us (re-engage after random events), else an idle one.
+     * Never start a fight on a goblin already in combat with someone else.
      */
     findAttackableGoblin() {
         const onMe = this.findGoblinFightingMe();
@@ -548,7 +565,7 @@ class LumbridgeGoblinKiller extends LoopingBot {
             .name('Goblin')
             .action('Attack')
             .within(LEASH + 4)
-            .where(n => !n.inCombat || npcTargetsMe(n))
+            .where(n => !n.inCombat)
             .nearest();
     }
 
@@ -762,11 +779,11 @@ class LumbridgeGoblinKiller extends LoopingBot {
 
 export default defineBot({
     name: SCRIPT_NAME,
-    version: '1.4.0',
+    version: '1.5.0',
     category: 'Combat',
     tags: ['goblin', 'lumbridge', 'melee', 'death-recovery', 'xp', 'prayer'],
     description:
-        'Lumbridge goblins until death; re-engages after random events; door-aware attacks; optional bone bury + auto-lowest combat training',
+        "Benzyme's Goblin Killer v1.0 — Lumbridge goblins; re-engages after random events; bronze sword + wooden shield only",
     settingsSchema: {
         buryBones: {
             type: 'boolean',
