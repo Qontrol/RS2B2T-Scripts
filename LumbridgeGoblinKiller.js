@@ -23,6 +23,8 @@ const {
     GroundItems,
     Equipment,
     Inventory,
+    Bank,
+    Banking,
     Traversal,
     Tile,
     Skills,
@@ -214,6 +216,8 @@ class LumbridgeGoblinKiller extends LoopingBot {
     deaths = 0;
     attacks = 0;
     status = 'starting';
+    /** False until we have banked everything and withdrawn/equipped GEAR once. */
+    gearReady = false;
 
     autoLowest = true;
     levelsBeforeSwap = 1;
@@ -255,6 +259,7 @@ class LumbridgeGoblinKiller extends LoopingBot {
         this.xpAtStart = Object.create(null);
         this.usedSkills = new Set();
         this.buried = 0;
+        this.gearReady = false;
         for (const skill of COMBAT_TRACK) {
             this.xpAtStart[skill] = Skills.xp(skill);
         }
@@ -289,8 +294,9 @@ class LumbridgeGoblinKiller extends LoopingBot {
                 : `started — fixed style ${this.desiredStyle}`
         );
         this.log(`bury bones: ${this.buryBones ? 'on' : 'off'}`);
+        this.log('first: bank all → withdraw/equip Bronze sword + Wooden shield');
         this.log('tip: Pause → Edit parameters to change prefs without stopping');
-        this.status = 'ready';
+        this.status = 'gear: bank';
     }
 
     onPause() {
@@ -334,7 +340,7 @@ class LumbridgeGoblinKiller extends LoopingBot {
             }
         }
 
-        if (await this.ensureGear()) {
+        if (await this.prepCombatGear()) {
             return;
         }
 
@@ -402,7 +408,7 @@ class LumbridgeGoblinKiller extends LoopingBot {
     onPaint(ctx) {
         const elapsed = Date.now() - this.startedAt;
         const lines = [
-            `Benzyme's Goblin Killer v1.0  ${this.desiredStyle}  atk ${this.attacks}  deaths ${this.deaths}`,
+            `Benzyme's Goblin Killer v1.6  ${this.desiredStyle}  atk ${this.attacks}  deaths ${this.deaths}`,
             `time ${fmtElapsed(elapsed)}  ·  ${this.status}`
         ];
 
@@ -756,6 +762,15 @@ class LumbridgeGoblinKiller extends LoopingBot {
         }
         await Execution.delayTicks(3);
 
+        const haveGear = GEAR.every(g => Equipment.contains(g) || Inventory.first(g));
+        if (!haveGear) {
+            this.gearReady = false;
+            this.log('gear missing after death — will bank + withdraw again');
+            this.recovering = false;
+            this.status = 'gear: bank';
+            return;
+        }
+
         this.status = 're-equipping';
         for (const item of GEAR) {
             if (Equipment.contains(item)) {
@@ -783,6 +798,107 @@ class LumbridgeGoblinKiller extends LoopingBot {
         }
     }
 
+    hasGearEquipped() {
+        return GEAR.every(g => Equipment.contains(g));
+    }
+
+    /**
+     * Startup (and when gear is missing): unequip → deposit all → withdraw GEAR → equip.
+     * After gearReady, only re-equip from the pack if something was removed.
+     * @returns {Promise<boolean>} true if this loop spent time on gear
+     */
+    async prepCombatGear() {
+        if (this.gearReady) {
+            return await this.ensureGear();
+        }
+
+        this.status = 'gear: bank';
+
+        // Bank worn junk too — strip everything before deposit.
+        for (const worn of Equipment.items()) {
+            const name = worn.name;
+            if (!name) {
+                continue;
+            }
+            this.log(`gear: unequipping ${name}`);
+            if (!(await Equipment.unequip(name))) {
+                this.log(`gear: could not unequip ${name}`);
+                await Execution.delayTicks(1);
+                return true;
+            }
+            await Execution.delayTicks(1);
+        }
+
+        if (!Bank.isOpen()) {
+            this.log('gear: opening bank — deposit all, withdraw sword + shield');
+            if (!(await Banking.open({ log: m => this.log(`  ${m}`) }))) {
+                this.log('gear: could not open bank — retrying');
+                await Execution.delayTicks(3);
+                return true;
+            }
+        }
+
+        if (typeof Bank.loaded === 'function') {
+            await Execution.delayUntil(() => Bank.loaded() || Bank.items().length > 0, 3000);
+        }
+        await Execution.delayTicks(1);
+
+        this.log('gear: depositing inventory');
+        if (typeof Bank.depositInventory === 'function') {
+            await Bank.depositInventory();
+        } else {
+            await Bank.depositAllMatching(() => true);
+        }
+        await Execution.delayTicks(1);
+
+        for (const item of GEAR) {
+            if (Inventory.first(item)) {
+                continue;
+            }
+            const inBank = Bank.count(item) || 0;
+            if (inBank <= 0) {
+                this.log(`WARNING: no ${item} in bank — put one in, then continue`);
+                continue;
+            }
+            this.log(`gear: withdrawing ${item}`);
+            if (!(await Bank.withdrawX(item, 1))) {
+                this.log(`gear: withdraw failed for ${item}`);
+                await Execution.delayTicks(2);
+                return true;
+            }
+            await Execution.delayTicks(1);
+        }
+
+        await Bank.close();
+        await Execution.delayTicks(1);
+
+        for (const item of GEAR) {
+            if (Equipment.contains(item)) {
+                continue;
+            }
+            if (!Inventory.first(item)) {
+                continue;
+            }
+            this.status = `gear: equip ${item}`;
+            if (await Equipment.equip(item)) {
+                this.log(`gear: equipped ${item}`);
+            } else {
+                this.log(`WARNING: could not equip ${item}`);
+            }
+            await Execution.delayTicks(1);
+        }
+
+        if (this.hasGearEquipped()) {
+            this.gearReady = true;
+            this.status = 'ready';
+            this.log('gear ready — Bronze sword + Wooden shield equipped; heading to goblins');
+        } else {
+            this.log('gear incomplete — need Bronze sword and Wooden shield in the bank');
+            await Execution.delayTicks(8);
+        }
+        return true;
+    }
+
     /** @returns {Promise<boolean>} true if this loop spent time equipping */
     async ensureGear() {
         let did = false;
@@ -791,7 +907,9 @@ class LumbridgeGoblinKiller extends LoopingBot {
                 continue;
             }
             if (!Inventory.first(item)) {
-                continue;
+                this.gearReady = false;
+                this.log(`missing ${item} — will bank + withdraw again`);
+                return true;
             }
             this.status = `equipping ${item}`;
             if (await Equipment.equip(item)) {
@@ -805,11 +923,11 @@ class LumbridgeGoblinKiller extends LoopingBot {
 
 export default defineBot({
     name: SCRIPT_NAME,
-    version: '1.5.0',
+    version: '1.6.0',
     category: 'Combat',
-    tags: ['goblin', 'lumbridge', 'melee', 'death-recovery', 'xp', 'prayer'],
+    tags: ['goblin', 'lumbridge', 'melee', 'death-recovery', 'xp', 'prayer', 'bank'],
     description:
-        "Benzyme's Goblin Killer v1.0 — Lumbridge goblins; re-engages after random events; bronze sword + wooden shield only",
+        "Benzyme's Goblin Killer — banks all first, withdraws/equips Bronze sword + Wooden shield, then Lumbridge goblins",
     settingsSchema: {
         buryBones: {
             type: 'boolean',
