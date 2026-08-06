@@ -1,5 +1,5 @@
 /**
- * AlKharidNetFisher — small-net around 3267,3149 (always prefer that pin when the spot hops back).
+ * AlKharidNetFisher — small-net only at 3267,3149; stays and waits there when the spot hops away.
  * On combat: run to Al Kharid bank, wait 60s, then fish again.
  * On death: walk back to the spot, loot the net, continue.
  * Banks catch; optional cook-then-bank after a full inventory.
@@ -36,15 +36,12 @@ const {
 
 const SCRIPT_NAME = 'AlKharidNetFisher';
 
-/** Preferred fishing stand / spot pin — always jump here when this hop is up. */
+/** Preferred fishing stand — only Net this hop; wait here when it moves. */
 const ANCHOR = new Tile(3267, 3149, 0);
-/** Exact preferred hop (spot tile or player stand within this of ANCHOR). */
+/** Spot tile must be this close to ANCHOR (covers 3267,3148 water tile vs player stand). */
 const PREFERRED_RADIUS = 1;
-/**
- * West hops (~3267,3148 / 3268,3147) are ≤2 from pin; east spots (~3275,3140) are ~9.
- * Leash 4 keeps the western cluster without chasing scorpion spots.
- */
-const SPOT_LEASH = 4;
+/** Soft stand radius — recenter on the pin if we drift. */
+const STAND_RADIUS = 1;
 
 /** Al Kharid bank — combat safe haven. */
 const BANK_STAND = new Tile(3269, 3167, 0);
@@ -231,10 +228,6 @@ function openDoorOp(loc) {
     return loc.actions().find(a => /^open/i.test(a)) ?? null;
 }
 
-function spotAtPinnedCamp(spotTile) {
-    return Tile.from(spotTile).distanceTo(ANCHOR) <= SPOT_LEASH;
-}
-
 function isPreferredSpotTile(spotTile) {
     return Tile.from(spotTile).distanceTo(ANCHOR) <= PREFERRED_RADIUS;
 }
@@ -308,7 +301,7 @@ class AlKharidNetFisher extends LoopingBot {
         });
 
         this.log(
-            `AlKharidNetFisher prefers ${ANCHOR.x},${ANCHOR.z} (camp leash ${SPOT_LEASH}) — ` +
+            `AlKharidNetFisher — stay/wait at ${ANCHOR.x},${ANCHOR.z} only — ` +
                 `cook: ${this.cookShrimp ? 'on' : 'off'}; combat → bank + 60s; death → return + loot net`
         );
         if (!hasNet()) {
@@ -571,50 +564,43 @@ class AlKharidNetFisher extends LoopingBot {
             return;
         }
 
-        // Stay in the western cluster around 3267,3149 while spots hop.
-        if (Tile.from(here).distanceTo(ANCHOR) > SPOT_LEASH) {
-            this.status = 'returning to camp';
-            this.log(`outside camp — walking back to ${ANCHOR.x},${ANCHOR.z}`);
+        // Always camp the preferred pin — never chase other hops.
+        if (Tile.from(here).distanceTo(ANCHOR) > STAND_RADIUS) {
+            this.status = 'returning to preferred spot';
+            this.log(`walking to preferred stand ${ANCHOR.x},${ANCHOR.z}`);
             await Traversal.walkResilient(ANCHOR, {
-                radius: 2,
+                radius: 0,
                 log: m => this.log(`  ${m}`)
             });
             return;
         }
 
-        // Preferred pin hop appeared — interrupt other west hops immediately.
         const preferred = this.findPreferredSpot();
-        if (preferred && !this.fishingPreferred) {
-            await this.netSpot(preferred, true);
-            return;
-        }
 
-        if (Game.animating()) {
-            if (this.fishingPreferred && !preferred) {
-                this.fishingPreferred = false;
-            }
-            this.status = this.fishingPreferred
-                ? 'fishing preferred 3267,3149'
-                : 'fishing (watching for preferred)';
+        if (Game.animating() && preferred) {
+            this.fishingPreferred = true;
+            this.status = 'fishing preferred 3267,3149';
             await Execution.delayTicks(1);
             return;
         }
 
-        const spot = preferred ?? this.findPinnedSpot();
-        if (!spot) {
+        if (!preferred) {
             this.fishingPreferred = false;
-            this.status = `waiting for spot near ${ANCHOR.x},${ANCHOR.z}`;
-            if (Tile.from(here).distanceTo(ANCHOR) > 1) {
-                await Traversal.walkTo(ANCHOR, { radius: 1, timeoutMs: 8_000 });
-            }
+            this.status = `waiting at ${ANCHOR.x},${ANCHOR.z} for spot`;
             await Execution.delayTicks(3);
             return;
         }
 
-        await this.netSpot(spot, isPreferredSpotTile(spot.tile()));
+        if (Game.animating() && this.fishingPreferred) {
+            this.status = 'fishing preferred 3267,3149';
+            await Execution.delayTicks(1);
+            return;
+        }
+
+        await this.netSpot(preferred);
     }
 
-    async netSpot(spot, preferred) {
+    async netSpot(spot) {
         const op = netOp(spot.actions());
         if (!op) {
             this.log(`spot has no Net action: [${spot.actions().join(', ')}]`);
@@ -624,14 +610,9 @@ class AlKharidNetFisher extends LoopingBot {
 
         const before = rawFishCount();
         const st = spot.tile();
-        this.fishingPreferred = !!preferred;
-        this.status = preferred
-            ? `netting preferred (${st.x},${st.z})`
-            : `netting (${st.x},${st.z})`;
-        this.log(
-            `${preferred ? 'PREFERRED ' : ''}Net Fishing spot @ ${st.x},${st.z}` +
-                (preferred ? '' : ' (will switch if 3267,3149 opens)')
-        );
+        this.fishingPreferred = true;
+        this.status = `netting preferred (${st.x},${st.z})`;
+        this.log(`Net preferred Fishing spot @ ${st.x},${st.z}`);
         await spot.interact(op);
 
         await Execution.delayUntil(
@@ -640,40 +621,18 @@ class AlKharidNetFisher extends LoopingBot {
                 Game.animating() ||
                 ChatDialog.canContinue() ||
                 Game.inCombat() ||
-                (!!this.findPreferredSpot() && !preferred),
+                !this.findPreferredSpot(),
             8000
         );
         this.noteCatches();
     }
 
-    /** Exact preferred hop at/next to 3267,3149 — always take this when present. */
+    /** Only the hop at/next to 3267,3149 — nowhere else. */
     findPreferredSpot() {
         const spots = Npcs.query()
             .name(SPOT_NAME)
             .where(n => netOp(n.actions()) !== null)
             .where(n => isPreferredSpotTile(n.tile()))
-            .results();
-        if (!spots || spots.length === 0) {
-            return null;
-        }
-        let best = spots[0];
-        let bestD = Tile.from(best.tile()).distanceTo(ANCHOR);
-        for (let i = 1; i < spots.length; i++) {
-            const d = Tile.from(spots[i].tile()).distanceTo(ANCHOR);
-            if (d < bestD) {
-                best = spots[i];
-                bestD = d;
-            }
-        }
-        return best;
-    }
-
-    /** Nearest Net spot inside the western camp leash (fallback when preferred is down). */
-    findPinnedSpot() {
-        const spots = Npcs.query()
-            .name(SPOT_NAME)
-            .where(n => netOp(n.actions()) !== null)
-            .where(n => spotAtPinnedCamp(n.tile()))
             .results();
         if (!spots || spots.length === 0) {
             return null;
@@ -941,11 +900,11 @@ class AlKharidNetFisher extends LoopingBot {
 
 export default defineBot({
     name: SCRIPT_NAME,
-    version: '1.2.0',
+    version: '1.3.0',
     category: 'Fishing',
     tags: ['fishing', 'al-kharid', 'net', 'shrimp', 'anchovies', 'bank', 'cook', 'combat', 'death'],
     description:
-        'Prefers Net at 3267,3149 (switches there whenever that hop is up). Combat→bank+60s. Death→walk back, loot net, continue. Optional cook then bank.',
+        'Stays and waits at 3267,3149 — only Nets that hop. Combat→bank+60s. Death→walk back, loot net, continue. Optional cook then bank.',
     settingsSchema: {
         cookShrimp: {
             type: 'boolean',
