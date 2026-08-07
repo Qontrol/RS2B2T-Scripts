@@ -140,6 +140,10 @@ const RANGE_LEASH = 8;
 const ROD_NAME = 'Fishing rod';
 const BAIT_NAME = 'Fishing bait';
 const SPOT_NAME = 'Fishing spot';
+/** Cap for bait purchased from Harry when the bank is empty. */
+const BAIT_BUY_MAX = 500;
+/** Harry's Fishing bait baseline cost (gp each). */
+const BAIT_COST = 3;
 
 /** Raw names Harry buys that we catch (bait on Net+Bait). */
 const HARRY_BUY_RAW = new Set(['raw sardine', 'raw herring']);
@@ -418,6 +422,19 @@ function hasBait() {
 
 function needsGear() {
     return !hasRod() || !hasBait();
+}
+
+function isCoins(name) {
+    return (name ?? '').toLowerCase() === 'coins';
+}
+
+function coinCount() {
+    return countMatching(isCoins);
+}
+
+/** How many bait to buy from Harry to reach BAIT_BUY_MAX (never above 500). */
+function baitBuyWant() {
+    return Math.max(0, BAIT_BUY_MAX - baitCount());
 }
 
 function netOp(actions) {
