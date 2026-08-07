@@ -34,6 +34,59 @@ const {
 
 const SCRIPT_NAME = 'AlKharidNetFisher';
 
+/** Post-login welcome modal interface id (Close Window top-right). */
+const WELCOME_SCREEN_ID = 5993;
+
+/**
+ * Dismiss "Welcome to RuneScape" / message-centre modal via Close Window.
+ * Uses host reader/actions when available (rs2b0t load-local).
+ * @returns {Promise<boolean>} true if we closed it
+ */
+async function dismissWelcomeScreen() {
+    const host = globalThis.rs2b0t;
+    if (!host?.reader || !host?.actions) {
+        return false;
+    }
+    const { reader, actions } = host;
+    const main = typeof reader.modals === 'function' ? reader.modals().main : -1;
+    if (main === -1) {
+        return false;
+    }
+    let isWelcome = main === WELCOME_SCREEN_ID;
+    if (!isWelcome && typeof reader.mainModalTexts === 'function') {
+        const texts = reader.mainModalTexts();
+        isWelcome = texts.some(
+            t =>
+                /welcome to runescape/i.test(t) ||
+                /unread messages/i.test(t) ||
+                /jagex staff will never email/i.test(t)
+        );
+    }
+    if (!isWelcome) {
+        return false;
+    }
+    // Prefer real Close Window click (BUTTON_CLOSE → CLOSE_MODAL).
+    if (typeof actions.closeModal === 'function' && actions.closeModal()) {
+        await Execution.delay(250);
+        return true;
+    }
+    if (typeof actions.closeMainModal === 'function' && actions.closeMainModal(main)) {
+        await Execution.delay(250);
+        return true;
+    }
+    if (typeof reader.buttonByText === 'function' && typeof actions.ifButton === 'function') {
+        let btn = reader.buttonByText(main, 'Close Window');
+        if (btn === -1) {
+            btn = reader.buttonByText(main, 'Close');
+        }
+        if (btn !== -1 && actions.ifButton(btn)) {
+            await Execution.delay(250);
+            return true;
+        }
+    }
+    return false;
+}
+
 /** Preferred fishing stand — only Net this hop; wait here when it moves. */
 const ANCHOR = new Tile(3267, 3149, 0);
 /** Spot tile must be this close to ANCHOR (covers 3267,3148 water tile vs player stand). */
@@ -390,6 +443,10 @@ class AlKharidNetFisher extends LoopingBot {
     async loop() {
         if (!Game.ingame()) {
             await Execution.delayTicks(5);
+            return;
+        }
+        if (await dismissWelcomeScreen()) {
+            this.status = 'close welcome';
             return;
         }
 

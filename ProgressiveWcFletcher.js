@@ -40,6 +40,59 @@ const {
 
 const SCRIPT_NAME = 'ProgressiveWcFletcher';
 
+/** Post-login welcome modal interface id (Close Window top-right). */
+const WELCOME_SCREEN_ID = 5993;
+
+/**
+ * Dismiss "Welcome to RuneScape" / message-centre modal via Close Window.
+ * Uses host reader/actions when available (rs2b0t load-local).
+ * @returns {Promise<boolean>} true if we closed it
+ */
+async function dismissWelcomeScreen() {
+    const host = globalThis.rs2b0t;
+    if (!host?.reader || !host?.actions) {
+        return false;
+    }
+    const { reader, actions } = host;
+    const main = typeof reader.modals === 'function' ? reader.modals().main : -1;
+    if (main === -1) {
+        return false;
+    }
+    let isWelcome = main === WELCOME_SCREEN_ID;
+    if (!isWelcome && typeof reader.mainModalTexts === 'function') {
+        const texts = reader.mainModalTexts();
+        isWelcome = texts.some(
+            t =>
+                /welcome to runescape/i.test(t) ||
+                /unread messages/i.test(t) ||
+                /jagex staff will never email/i.test(t)
+        );
+    }
+    if (!isWelcome) {
+        return false;
+    }
+    // Prefer real Close Window click (BUTTON_CLOSE → CLOSE_MODAL).
+    if (typeof actions.closeModal === 'function' && actions.closeModal()) {
+        await Execution.delay(250);
+        return true;
+    }
+    if (typeof actions.closeMainModal === 'function' && actions.closeMainModal(main)) {
+        await Execution.delay(250);
+        return true;
+    }
+    if (typeof reader.buttonByText === 'function' && typeof actions.ifButton === 'function') {
+        let btn = reader.buttonByText(main, 'Close Window');
+        if (btn === -1) {
+            btn = reader.buttonByText(main, 'Close');
+        }
+        if (btn !== -1 && actions.ifButton(btn)) {
+            await Execution.delay(250);
+            return true;
+        }
+    }
+    return false;
+}
+
 /** Switch to oaks only when both are met. */
 const OAK_WC_REQ = 15;
 const OAK_FLETCH_REQ = 20;
@@ -519,6 +572,10 @@ class ProgressiveWcFletcher extends LoopingBot {
     async loop() {
         if (!Game.ingame()) {
             await Execution.delayTicks(5);
+            return;
+        }
+        if (await dismissWelcomeScreen()) {
+            this.status = 'close welcome';
             return;
         }
 
