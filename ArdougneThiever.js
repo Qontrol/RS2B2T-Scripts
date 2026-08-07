@@ -138,7 +138,8 @@ const TARGETS = {
         anchor: new Tile(2630, 3297, 0),
         leash: 16
     },
-    Guard: {
+    'Ardougne guard': {
+        /** In-game NPC name to match (no id filter). */
         name: 'Guard',
         npcId: null,
         thieving: 40,
@@ -362,8 +363,8 @@ class ArdougneThiever extends LoopingBot {
         }
 
         this.log(
-            `Benzyme's Ardougne Thiever — first bank all (inv+equipped), withdraw food, ` +
-                `then ${cfg.name} @ ${cfg.anchor.x},${cfg.anchor.z}` +
+            `Benzyme's Ardougne Thiever — bank only if food < withdraw amount, then ` +
+                `${cfg.name} @ ${cfg.anchor.x},${cfg.anchor.z}` +
                 (cfg.npcId != null ? ` (id ${cfg.npcId})` : '') +
                 `; eat ≤ ${this.eatAtHp}; food ${this.describeFoodPrefs()}` +
                 (this.foodEnabled() ? ` ×${this.foodWithdraw}` : '')
@@ -497,6 +498,11 @@ class ArdougneThiever extends LoopingBot {
         return this.foodEnabled() && this.foodCount() === 0;
     }
 
+    /** True when inventory already has at least foodWithdraw of enabled food. */
+    hasEnoughStartFood() {
+        return this.foodEnabled() && this.foodCount() >= this.foodWithdraw;
+    }
+
     /** Snapshot bank Coins while the bank interface is open. */
     refreshBankGp() {
         if (!Bank.isOpen()) {
@@ -613,9 +619,25 @@ class ArdougneThiever extends LoopingBot {
     }
 
     /**
-     * Script start: unequip everything → deposit inventory → withdraw chosen food → go thieve.
+     * Script start: if inventory already has foodWithdraw of enabled food, skip bank.
+     * Otherwise unequip → deposit inventory → withdraw food → go thieve.
      */
     async prepStartBank() {
+        if (this.hasEnoughStartFood()) {
+            this.startReady = true;
+            const cfg = this.targetCfg();
+            this.status = `walking to ${cfg.name}`;
+            this.log(
+                `start: already have ${this.foodCount()} food (≥ ${this.foodWithdraw}) — skipping bank, ` +
+                    `walking to ${cfg.anchor.x},${cfg.anchor.z} for ${cfg.name}`
+            );
+            await Traversal.walkResilient(cfg.anchor, {
+                radius: 3,
+                log: m => this.log(`  ${m}`)
+            });
+            return;
+        }
+
         this.status = 'start: bank';
 
         for (const worn of Equipment.items()) {
@@ -878,7 +900,7 @@ export default defineBot({
     category: 'Thieving',
     tags: ['thieving', 'ardougne', 'pickpocket', 'man', 'guard', 'warrior', 'cake'],
     description:
-        "Benzyme's Ardougne Thiever — pickpocket Men, Warrior women, or Guards; optional cake/choc food with HP eat slider",
+        "Benzyme's Ardougne Thiever — pickpocket Men, Warrior women, or Ardougne guards; optional cake/choc food with HP eat slider",
     settingsSchema: {
         target: {
             type: 'string',
@@ -886,7 +908,7 @@ export default defineBot({
             options: TARGET_OPTIONS,
             label: 'Pickpocket target',
             group: 'Thieving',
-            help: 'Man at 2625,3291 (Thieving 1), Warrior woman id 15 at 2630,3297 (Thieving 25), or Guard in East Ardougne (Thieving 40)'
+            help: 'Man at 2625,3291 (Thieving 1), Warrior woman id 15 at 2630,3297 (Thieving 25), or Ardougne guard by name Guard (Thieving 40)'
         },
         eatAtHp: {
             type: 'number',

@@ -759,19 +759,13 @@ class OakTreeFletcher extends LoopingBot {
 
         await gearWaitBankLoaded();
 
-        if (Inventory.free() < 2) {
-            await Bank.depositAllMatching(name => {
-                const n = (name ?? '').toLowerCase();
-                if (!n || n === 'coins' || n === 'knife') {
-                    return false;
-                }
-                if (isKeepTool(name)) {
-                    return false;
-                }
-                return true;
-            });
-            await Execution.delayTicks(1);
-        }
+        // Initial gear bank: pack must be knife-only, then withdraw axe/coins.
+        this.log('gear: depositing all except Knife');
+        await Bank.depositAllMatching(name => {
+            const n = (name ?? '').toLowerCase();
+            return !!n && n !== 'knife';
+        });
+        await Execution.delayTicks(1);
 
         const wc = Skills.level('woodcutting');
         const best = bestAxe(wc, n => gearAxeCount(n) > 0 || (Bank.count(n) || 0) > 0);

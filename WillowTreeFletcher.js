@@ -1,17 +1,17 @@
 /**
- * OakTreeFletcherSell — same oak camp/fletch as OakTreeFletcher, but sells bows
- * at Varrock General Store then banks the coins (keeps knife/axe).
+ * WillowTreeFletcher — chop Willows at 3087,3235 (20t leash), fletch willow bows by level, bank.
+ * Fletching: Willow shortbow @35 → Willow longbow @40 (bank willow logs below 35).
  * Completely vibe coded by @.benzyme on Discord via Cursor AI
  * Self-contained ESM for rs2b0t Load local script / Load URL.
  */
 const SUPPORTED_API_VERSION = 1;
 const abi = globalThis.__rs2b0t;
 if (!abi) {
-    throw new Error('OakTreeFletcherSell: globalThis.__rs2b0t missing — load inside rs2b0t bot.html');
+    throw new Error('WillowTreeFletcher: globalThis.__rs2b0t missing — load inside rs2b0t bot.html');
 }
 if (abi.apiVersion !== SUPPORTED_API_VERSION) {
     throw new Error(
-        `OakTreeFletcherSell: ABI ${abi.apiVersion} != supported ${SUPPORTED_API_VERSION}`
+        `WillowTreeFletcher: ABI ${abi.apiVersion} != supported ${SUPPORTED_API_VERSION}`
     );
 }
 
@@ -37,7 +37,7 @@ const {
     canWieldTool
 } = abi;
 
-const SCRIPT_NAME = 'OakTreeFletcherSell';
+const SCRIPT_NAME = 'WillowTreeFletcher';
 
 /** Post-login welcome modal interface id (Close Window top-right). */
 const WELCOME_SCREEN_ID = 5993;
@@ -122,20 +122,15 @@ async function dismissWelcomeScreen() {
     return !isWelcomeModalOpen();
 }
 
-/** Oak camp — center + walking radius. */
-const ANCHOR = new Tile(3166, 3416, 0);
+/** Willow camp (Draynor, south of bank) — center + walking radius. */
+const ANCHOR = new Tile(3087, 3235, 0);
 const LEASH = 20;
-const TREE_NAME = 'Oak';
-
-/** Varrock General Store (quest anchors). */
-const STORE_STAND = new Tile(3218, 3414, 0);
-const STORE_KEEPER = 'Shop keeper';
-/** Closest bank after selling. */
-const VARROCK_WEST_BANK = new Tile(3185, 3440, 0);
+const TREE_NAME = 'Willow';
+const LOG_NAME = 'Willow logs';
 
 /** Fletching tier thresholds. */
-const SHORTBOW_LEVEL = 20;
-const LONGBOW_LEVEL = 25;
+const SHORTBOW_LEVEL = 35;
+const LONGBOW_LEVEL = 40;
 
 /** Lumbridge knife spawn (behind Bob's) + Bob steel axe / repair. */
 const GEAR_KNIFE_SPAWN = new Tile(3224, 3202, 0);
@@ -146,7 +141,7 @@ const GEAR_BROKEN_AXE = 'Broken axe';
 const GEAR_REPAIR_PREFER = ['repair', 'fix', 'fix my', 'yes'];
 const GEAR_REPAIR_COIN_FLOAT = 100;
 
-/** Always keep these when banking / never sell. */
+/** Always keep these when banking (never deposit). */
 const KEEP_TOOLS = [
     'knife',
     'broken axe',
@@ -297,76 +292,82 @@ function normName(name) {
     return (name ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
+/**
+ * Willow shortbow — "Willow shortbow", "Willow short bow", or (u) / unstrung variants.
+ */
 function isFletchedShortbow(name) {
     const n = normName(name);
-    if (!n.includes('oak')) {
+    if (!n.includes('willow')) {
         return false;
     }
-    return n.includes('short') && n.includes('bow');
+    if (!(n.includes('short') && n.includes('bow'))) {
+        return false;
+    }
+    return true;
 }
 
+/**
+ * Willow longbow — "Willow longbow", "Willow long bow", or (u) / unstrung variants.
+ */
 function isFletchedLongbow(name) {
     const n = normName(name);
-    if (!n.includes('oak')) {
+    if (!n.includes('willow')) {
         return false;
     }
-    return n.includes('long') && n.includes('bow');
+    if (!(n.includes('long') && n.includes('bow'))) {
+        return false;
+    }
+    return true;
 }
 
 function isBankableBow(name) {
     return isFletchedShortbow(name) || isFletchedLongbow(name);
 }
 
-function isOakLog(name) {
+function isWillowLog(name) {
     const n = normName(name);
-    return n === 'oak logs' || n === 'oak log';
+    return n === 'willow logs' || n === 'willow log';
 }
 
-function isCoins(name) {
-    return normName(name) === 'coins';
-}
-
+/** Current fletch product for the make-menu + banking phase. */
 function fletchPlan(level) {
     if (level < SHORTBOW_LEVEL) {
         return {
             id: 'logs',
             menuMatch: '',
-            label: 'Oak logs (bank)',
+            label: 'Willow logs (bank)',
             bank: true,
-            fletch: false,
-            sell: false
+            fletch: false
         };
     }
     if (level < LONGBOW_LEVEL) {
         return {
-            id: 'oak-shortbow',
+            id: 'willow-shortbow',
             menuMatch: 'short',
-            label: 'Oak shortbow',
-            bank: false,
-            fletch: true,
-            sell: true
+            label: 'Willow shortbow',
+            bank: true,
+            fletch: true
         };
     }
     return {
-        id: 'oak-longbow',
+        id: 'willow-longbow',
         menuMatch: 'long',
-        label: 'Oak longbow',
-        bank: false,
-        fletch: true,
-        sell: true
+        label: 'Willow longbow',
+        bank: true,
+        fletch: true
     };
 }
 
 function matchMakeProduct(products, menuMatch) {
     const want = menuMatch.toLowerCase();
-    const oakish = products.filter(p => (p ?? '').toLowerCase().includes('oak'));
-    const pool = oakish.length > 0 ? oakish : products;
+    const willowish = products.filter(p => (p ?? '').toLowerCase().includes('willow'));
+    const pool = willowish.length > 0 ? willowish : products;
     return pool.find(p => (p ?? '').toLowerCase().includes(want)) ?? null;
 }
 
 function logCount() {
     return Inventory.items()
-        .filter(i => isOakLog(i.name))
+        .filter(i => isWillowLog(i.name))
         .reduce((n, i) => n + Math.max(1, i.count), 0);
 }
 
@@ -379,7 +380,7 @@ function knifeItem() {
 function lastLog() {
     const items = Inventory.items();
     for (let i = items.length - 1; i >= 0; i--) {
-        if (isOakLog(items[i].name)) {
+        if (isWillowLog(items[i].name)) {
             return items[i];
         }
     }
@@ -398,66 +399,32 @@ function shortbowCount() {
         .reduce((n, i) => n + Math.max(1, i.count), 0);
 }
 
-function coinCount() {
-    return Inventory.items()
-        .filter(i => isCoins(i.name))
-        .reduce((n, i) => n + Math.max(0, i.count), 0);
-}
-
-/** Unique display names of bows currently held (Shop.sell needs exact names). */
-function bowNamesHeld() {
-    const names = [];
-    const seen = new Set();
-    for (const item of Inventory.items()) {
-        if (!isBankableBow(item.name) || !item.name) {
-            continue;
-        }
-        const key = item.name.toLowerCase();
-        if (seen.has(key)) {
-            continue;
-        }
-        seen.add(key);
-        names.push(item.name);
-    }
-    return names;
-}
-
-function countByExactName(name) {
-    return Inventory.items()
-        .filter(i => (i.name ?? '').toLowerCase() === name.toLowerCase())
-        .reduce((n, i) => n + Math.max(1, i.count), 0);
-}
-
-/** Below 20: bank full oak logs. At 20+: sell when logs are gone and bows remain. */
-function needsLogBank(plan) {
-    if (plan.fletch) {
+/** Bank when no logs left and we have bows/logs to deposit. */
+function needsBankTrip(plan) {
+    if (logCount() > 0 && plan.fletch) {
         return false;
     }
-    return logCount() > 0 && Inventory.isFull();
+    if (plan.bank && bowCount() > 0) {
+        return true;
+    }
+    // Below 35 (or after fletching): full/leftover willow logs → bank.
+    if (!plan.fletch && logCount() > 0 && Inventory.isFull()) {
+        return true;
+    }
+    if (plan.fletch && logCount() === 0 && bowCount() > 0) {
+        return true;
+    }
+    return !plan.fletch && logCount() > 0 && Inventory.isFull();
 }
 
-function needsSellTrip(plan) {
-    if (!plan.sell || !plan.fletch) {
-        return false;
-    }
-    if (logCount() > 0) {
-        return false;
-    }
-    return bowCount() > 0;
-}
-
-class OakTreeFletcherSell extends LoopingBot {
+class WillowTreeFletcher extends LoopingBot {
     status = 'starting';
     startedAt = 0;
     wcXpAtStart = 0;
     fletchXpAtStart = 0;
     chopped = 0;
     fletched = 0;
-    sellTrips = 0;
     bankTrips = 0;
-    soldBows = 0;
-    /** Last known Coins stack in the bank (updated after each GP deposit). */
-    totalGpEarned = 0;
     planId = 'logs';
     gearReady = false;
     needSteelBuy = false;
@@ -469,7 +436,6 @@ class OakTreeFletcherSell extends LoopingBot {
         this.startedAt = Date.now();
         this.wcXpAtStart = Skills.xp('woodcutting');
         this.fletchXpAtStart = Skills.xp('fletching');
-        this.totalGpEarned = 0;
         this.planId = fletchPlan(Skills.level('fletching')).id;
         this.gearReady = false;
         this.needSteelBuy = false;
@@ -490,9 +456,8 @@ class OakTreeFletcherSell extends LoopingBot {
 
         const plan = fletchPlan(Skills.level('fletching'));
         this.log(
-            `OakTreeFletcherSell @ ${ANCHOR.x},${ANCHOR.z} (leash ${LEASH}) — ` +
-                `fletching ${Skills.level('fletching')} → ${plan.label}; ` +
-                `sell bows @ Varrock General → bank GP`
+            `WillowTreeFletcher @ ${ANCHOR.x},${ANCHOR.z} (leash ${LEASH}) — ` +
+                `fletching ${Skills.level('fletching')} → ${plan.label}`
         );
         this.status = 'ready';
     }
@@ -552,13 +517,14 @@ class OakTreeFletcherSell extends LoopingBot {
             return;
         }
 
-        if (needsSellTrip(plan)) {
-            await this.sellBowsBankGpAndReturn();
+        if (needsBankTrip(plan)) {
+            await this.bankProductsAndReturn();
             return;
         }
 
-        if (needsLogBank(plan)) {
-            await this.bankLogsAndReturn();
+        // Below 35: bank a full pack of willow logs instead of fletching.
+        if (!plan.fletch && Inventory.isFull() && logCount() > 0) {
+            await this.bankProductsAndReturn();
             return;
         }
 
@@ -569,8 +535,8 @@ class OakTreeFletcherSell extends LoopingBot {
         }
 
         if (Tile.from(here).distanceTo(ANCHOR) > LEASH) {
-            this.status = 'returning to oaks';
-            this.log('walking back to oak camp');
+            this.status = 'returning to willows';
+            this.log('walking back to willow camp');
             await Traversal.walkResilient(ANCHOR, {
                 radius: 4,
                 log: m => this.log(`  ${m}`)
@@ -586,7 +552,7 @@ class OakTreeFletcherSell extends LoopingBot {
 
         const tree = this.findTree();
         if (!tree) {
-            this.status = 'waiting for oak';
+            this.status = 'waiting for willow';
             await Traversal.walkTo(ANCHOR, { radius: 3, timeoutMs: 10_000 });
             await Execution.delayTicks(2);
             return;
@@ -594,14 +560,14 @@ class OakTreeFletcherSell extends LoopingBot {
 
         const op = chopOp(tree.actions());
         if (!op) {
-            this.log(`Oak has no chop action: [${tree.actions().join(', ')}]`);
+            this.log(`Willow has no chop action: [${tree.actions().join(', ')}]`);
             await Execution.delayTicks(2);
             return;
         }
 
         const before = logCount();
         this.status = `chopping (${tree.distance()}t)`;
-        this.log(`chopping Oak @ ${tree.tile().x},${tree.tile().z}`);
+        this.log(`chopping Willow @ ${tree.tile().x},${tree.tile().z}`);
         await tree.interact(op);
         const gotLog = await Execution.delayUntil(
             () => logCount() > before || Game.animating() || ChatDialog.canContinue(),
@@ -1072,7 +1038,7 @@ class OakTreeFletcherSell extends LoopingBot {
         }
 
         this.status = `fletching ${plan.label}`;
-        this.log(`knife → oak logs (${logCount()} left) for ${plan.label}`);
+        this.log(`knife → willow logs (${logCount()} left) for ${plan.label}`);
         const before = logCount();
         if (!(await knife.useOn(log))) {
             await Execution.delayTicks(2);
@@ -1161,127 +1127,29 @@ class OakTreeFletcherSell extends LoopingBot {
         }
     }
 
-    /** Sell all oak bows at Varrock General, bank coins, return to oaks. */
-    async sellBowsBankGpAndReturn() {
+    async bankProductsAndReturn() {
+        const flvl = Skills.level('fletching');
         const bows = bowCount();
         const shorts = shortbowCount();
-        this.status = 'walking to Varrock store';
+        const logs = logCount();
+        this.status = 'banking';
         this.log(
-            `selling` +
-                (shorts ? ` ${shorts} Oak shortbow` : '') +
-                (bows - shorts > 0 ? ` ${bows - shorts} Oak longbow` : '') +
-                ` at Varrock General Store`
+            `banking` +
+                (shorts ? ` ${shorts} Willow shortbow` : '') +
+                (bows - shorts > 0 ? ` ${bows - shorts} Willow longbow` : '') +
+                (logs ? ` ${logs} Willow logs` : '') +
+                ` (fletching ${flvl})`
         );
 
-        await Traversal.walkResilient(STORE_STAND, {
-            radius: 2,
-            log: m => this.log(`  ${m}`)
-        });
-
-        this.status = 'opening shop';
-        if (!(await Shop.open(STORE_KEEPER))) {
-            this.log('could not open Shop keeper — retrying next loop');
-            await Execution.delayTicks(3);
-            return;
-        }
-
-        this.status = 'selling bows';
-        let sold = 0;
-        for (let guard = 0; guard < 60 && bowCount() > 0 && Shop.isOpen(); guard++) {
-            const names = bowNamesHeld();
-            if (names.length === 0) {
-                break;
-            }
-            for (const name of names) {
-                const have = countByExactName(name);
-                if (have <= 0) {
-                    continue;
-                }
-                const n = await Shop.sell(name, have);
-                if (n > 0) {
-                    sold += n;
-                    this.log(`sold ${n}× ${name}`);
-                }
-                await Execution.delayTicks(1);
-            }
-            if (bowCount() > 0) {
-                await Execution.delayTicks(1);
-            }
-        }
-
-        if (Shop.isOpen()) {
-            await Shop.close();
-        }
-
-        this.soldBows += sold;
-        this.sellTrips++;
-
-        if (bowCount() > 0) {
-            this.log(`WARNING: still holding ${bowCount()} bows after sell — will retry`);
-            await Execution.delayTicks(3);
-            return;
-        }
-
-        const gp = coinCount();
-        this.status = 'banking GP';
-        this.log(`banking ${gp} coins at Varrock West`);
-
         await Banking.bankNearest({
-            destination: { name: 'Varrock West', tile: VARROCK_WEST_BANK },
             deposit: name => {
                 if (isKeepTool(name)) {
                     return false;
-                }
-                if (isCoins(name)) {
-                    return true;
                 }
                 if (isBankableBow(name)) {
                     return true;
                 }
-                return isOakLog(name);
-            },
-            afterDeposit: async () => {
-                if ((Bank.count(GEAR_BROKEN_AXE) || 0) > 0 && !gearHasBrokenAxe()) {
-                    this.log('gear: withdrawing Broken axe');
-                    await Bank.withdrawX(GEAR_BROKEN_AXE, 1);
-                }
-                await this.refreshBankGp();
-                this.maybeQueueSteelBuy();
-            },
-            returnTo: ANCHOR,
-            log: m => this.log(`  ${m}`)
-        });
-
-        this.bankTrips++;
-        this.status = 'returning to oaks';
-    }
-
-    /** Read Coins currently stored in the open bank → totalGpEarned. */
-    async refreshBankGp() {
-        if (!Bank.isOpen()) {
-            return;
-        }
-        if (typeof Bank.loaded === 'function') {
-            await Execution.delayUntil(() => Bank.loaded() || Bank.count('Coins') > 0, 2500);
-        }
-        await Execution.delayTicks(1);
-        const bankCoins = Bank.count('Coins');
-        this.totalGpEarned = bankCoins;
-        this.log(`bank GP: ${bankCoins}`);
-    }
-
-    /** Below fletching 20: deposit oak logs only. */
-    async bankLogsAndReturn() {
-        const logs = logCount();
-        this.status = 'banking logs';
-        this.log(`banking ${logs} Oak logs (fletching < ${SHORTBOW_LEVEL})`);
-
-        await Banking.bankNearest({
-            deposit: name => {
-                if (isKeepTool(name)) {
-                    return false;
-                }
-                return isOakLog(name);
+                return isWillowLog(name);
             },
             afterDeposit: async () => {
                 if ((Bank.count(GEAR_BROKEN_AXE) || 0) > 0 && !gearHasBrokenAxe()) {
@@ -1295,13 +1163,12 @@ class OakTreeFletcherSell extends LoopingBot {
         });
 
         this.bankTrips++;
-        this.status = 'returning to oaks';
+        this.status = 'returning to willows';
     }
 
     onStop() {
         this.log(
             `stopped — chopped ~${this.chopped}, fletched ~${this.fletched}, ` +
-                `sold ~${this.soldBows}, bank GP ${this.totalGpEarned}, sell trips ${this.sellTrips}, ` +
                 `bank trips ${this.bankTrips} (${this.status})`
         );
     }
@@ -1316,10 +1183,10 @@ class OakTreeFletcherSell extends LoopingBot {
         const flXph = hrs > 0.008 ? flXp / hrs : 0;
 
         const lines = [
-            `OakSell  WC ${Skills.level('woodcutting')}  Fletch ${Skills.level('fletching')}`,
-            `time ${fmtElapsed(elapsed)}  ·  ${plan.label}${plan.sell ? ' → store+bank GP' : ' + bank'}  ·  ${this.status}`,
-            `logs ${logCount()}  bows ${bowCount()}  sold ${this.soldBows}  trips ${this.sellTrips}`,
-            `GP earned ${fmtXph(this.totalGpEarned)} (in bank)  ·  WC ${fmtXph(wcXph)}/hr  Fletch ${fmtXph(flXph)}/hr`
+            `WillowFletcher  WC ${Skills.level('woodcutting')}  Fletch ${Skills.level('fletching')}`,
+            `time ${fmtElapsed(elapsed)}  ·  ${plan.label}${plan.bank ? ' + bank' : ''}  ·  ${this.status}`,
+            `logs ${logCount()}  bows ${bowCount()}  trips ${this.bankTrips}`,
+            `WC ${fmtXph(wcXph)}/hr  Fletch ${fmtXph(flXph)}/hr`
         ];
 
         ctx.font = '12px monospace';
@@ -1331,7 +1198,7 @@ class OakTreeFletcherSell extends LoopingBot {
         const lineH = 16;
         ctx.fillStyle = 'rgba(0,0,0,0.55)';
         ctx.fillRect(6, 6, maxW + pad * 2, pad * 2 + lines.length * lineH);
-        ctx.fillStyle = '#9ecb6a';
+        ctx.fillStyle = '#c4a35a';
         lines.forEach((line, i) => {
             ctx.fillText(line, 6 + pad, 6 + pad + (i + 1) * lineH - 4);
         });
@@ -1342,8 +1209,8 @@ export default defineBot({
     name: SCRIPT_NAME,
     version: '1.0.0',
     category: 'Fletching',
-    tags: ['woodcutting', 'fletching', 'oak', 'shortbow', 'longbow', 'sell', 'varrock'],
+    tags: ['woodcutting', 'fletching', 'willow', 'shortbow', 'longbow'],
     description:
-        'Oaks at 3166,3416. Oak shortbow @20 / longbow @25 → sell all bows at Varrock General Store → bank GP → return. Logs banked below 20.',
-    create: () => new OakTreeFletcherSell()
+        'Chop Willows at 3087,3235 (20t leash). Bank willow logs <35 → Willow shortbow @35 → Willow longbow @40; bank and return.',
+    create: () => new WillowTreeFletcher()
 });
