@@ -1,5 +1,6 @@
 /**
- * SeersFlaxPicker — pick Flax at the Seers' Village field, bank at Seers, return.
+ * SeersFlaxPicker — pick Flax at the Seers' Village field, bank everything, return empty.
+ * Each bank trip unequips all gear and deposits the entire inventory (not just Flax).
  * Completely vibe coded by @.benzyme on Discord via Cursor AI
  * Self-contained ESM for rs2b0t Load local script / Load URL.
  */
@@ -21,6 +22,7 @@ const {
     LoopingBot,
     Locs,
     Inventory,
+    Equipment,
     Bank,
     Banking,
     Traversal,
@@ -241,7 +243,7 @@ class SeersFlaxPicker extends LoopingBot {
             return;
         }
 
-        if (Inventory.isFull() && flaxCount() > 0) {
+        if (Inventory.isFull()) {
             await this.bankAndReturn();
             return;
         }
@@ -360,23 +362,115 @@ class SeersFlaxPicker extends LoopingBot {
         return false;
     }
 
+    /** Deposit every inventory slot (no keep list). */
+    async depositEverything() {
+        if (Inventory.used() <= 0) {
+            return;
+        }
+        this.log('depositing inventory');
+        if (typeof Bank.depositInventory === 'function') {
+            await Bank.depositInventory();
+        } else {
+            await Bank.depositAllMatching(() => true);
+        }
+        await Execution.delayTicks(1);
+    }
+
+    /**
+     * Unequip all worn items into the pack.
+     * Needs free inventory slots — call after a deposit when the pack was full.
+     * @returns {Promise<boolean>} true if nothing remains equipped
+     */
+    async unequipAll() {
+        for (let guard = 0; guard < 16; guard++) {
+            const worn = Equipment.items().filter(i => i.name);
+            if (worn.length === 0) {
+                return true;
+            }
+            if (Inventory.isFull()) {
+                return false;
+            }
+            const name = worn[0].name;
+            this.log(`unequipping ${name}`);
+            if (!(await Equipment.unequip(name))) {
+                this.log(`could not unequip ${name}`);
+                await Execution.delayTicks(1);
+                return false;
+            }
+            await Execution.delayTicks(1);
+        }
+        return !Equipment.items().some(i => i.name);
+    }
+
+    /**
+     * Open Seers bank, deposit pack, strip all gear, deposit again, return empty.
+     */
     async bankAndReturn() {
         const held = flaxCount();
         this.status = 'banking';
-        this.log(`banking ${held} Flax`);
+        this.log(
+            `banking all (flax ${held}) — unequip everything, deposit inventory`
+        );
 
         this.lastFlaxSeen = 0;
 
-        await Banking.bankNearest({
-            destination: { name: "Seers' Village", tile: BANK_STAND },
-            deposit: name => isFlax(name),
-            returnTo: ANCHOR,
-            log: m => this.log(`  ${m}`)
-        });
+        const here = Game.tile();
+        if (!here || Tile.from(here).distanceTo(BANK_STAND) > 6) {
+            this.status = 'walking to bank';
+            await Traversal.walkResilient(BANK_STAND, {
+                radius: 2,
+                log: m => this.log(`  ${m}`)
+            });
+        }
+
+        if (!Bank.isOpen()) {
+            this.log('opening Seers bank');
+            if (
+                !(await Banking.open({
+                    stand: BANK_STAND,
+                    log: m => this.log(`  ${m}`)
+                }))
+            ) {
+                this.log('could not open bank — retrying');
+                await Execution.delayTicks(3);
+                return;
+            }
+        }
+
+        if (typeof Bank.loaded === 'function') {
+            await Execution.delayUntil(() => Bank.loaded() || Bank.items().length > 0, 3000);
+        }
+        await Execution.delayTicks(1);
+
+        // Free pack space first so unequips can land in inventory.
+        await this.depositEverything();
+
+        if (!(await this.unequipAll())) {
+            await this.depositEverything();
+            await this.unequipAll();
+        }
+        await this.depositEverything();
+
+        if (Equipment.items().some(i => i.name)) {
+            this.log('WARNING: still wearing gear after bank — will retry next trip');
+        }
+        if (Inventory.used() > 0) {
+            this.log(`WARNING: still holding ${Inventory.used()} after deposit — retrying deposit`);
+            await this.depositEverything();
+        }
+
+        if (Bank.isOpen()) {
+            await Bank.close();
+        }
 
         this.bankTrips++;
         this.lastFlaxSeen = flaxCount();
         this.status = 'returning to flax';
+        await Traversal.walkResilient(ANCHOR, {
+            radius: 4,
+            log: m => this.log(`  ${m}`)
+        });
+        await this.openNearbyBarrier();
     }
 
     onPaint(ctx) {
@@ -413,6 +507,6 @@ export default defineBot({
     category: 'Gathering',
     tags: ['flax', 'seers', 'bank', 'crafting', 'fletching'],
     description:
-        "Picks Flax at the Seers' Village field south of the bank, deposits full inventories, then returns to pick more.",
+        "Picks Flax at the Seers' Village field. On each bank trip: unequips all gear, deposits the entire inventory, then returns empty-handed.",
     create: () => new SeersFlaxPicker()
 });

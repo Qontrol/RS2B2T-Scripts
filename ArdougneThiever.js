@@ -40,6 +40,18 @@ function welcomeHost() {
     return globalThis.rs2b0t ?? null;
 }
 
+/** Ask the host runner to stop this script (same as the Stop button). */
+function stopScript() {
+    const host = welcomeHost();
+    if (typeof host?.stopScript === 'function') {
+        host.stopScript();
+        return;
+    }
+    if (typeof host?.runner?.stop === 'function') {
+        host.runner.stop();
+    }
+}
+
 function isWelcomeModalOpen() {
     const host = welcomeHost();
     if (!host?.reader) {
@@ -297,9 +309,19 @@ function openDoorOp(loc) {
 class ArdougneThiever extends LoopingBot {
     status = 'starting';
     targetKey = 'Warrior woman';
+    /** Eat (with food) or wait for regen (waitForHp, no food) at/below this HP. */
     eatAtHp = 10;
+    /** When food is off: pause pickpocketing until HP regenerates above eatAtHp. */
+    waitForHp = false;
     useCake = true;
     useChocolate = true;
+    /**
+     * Which food family we currently withdraw/restock: 'cake' | 'choc'.
+     * Flipped at the bank when the preferred food is gone but the other is available.
+     */
+    activeFood = 'cake';
+    /** True after a mid-run cake↔choc swap so syncPrefs does not undo it. */
+    foodFallbackLocked = false;
     /** How many of the primary food to withdraw when restocking. */
     foodWithdraw = 20;
     bankTrips = 0;
@@ -328,6 +350,7 @@ class ArdougneThiever extends LoopingBot {
         Traversal.preload();
         this.startPausedPrefUnlock();
 
+        this.foodFallbackLocked = false;
         this.syncPrefs({ silent: true });
         this.startedAt = Date.now();
         this.xpAtStart = Skills.xp('thieving');
@@ -366,8 +389,12 @@ class ArdougneThiever extends LoopingBot {
             `Benzyme's Ardougne Thiever — bank only if food < withdraw amount, then ` +
                 `${cfg.name} @ ${cfg.anchor.x},${cfg.anchor.z}` +
                 (cfg.npcId != null ? ` (id ${cfg.npcId})` : '') +
-                `; eat ≤ ${this.eatAtHp}; food ${this.describeFoodPrefs()}` +
-                (this.foodEnabled() ? ` ×${this.foodWithdraw}` : '')
+                `; HP ≤ ${this.eatAtHp}` +
+                (this.foodEnabled()
+                    ? ` eat; food ${this.describeFoodPrefs()} ×${this.foodWithdraw}`
+                    : this.waitForHp
+                      ? ' wait regen (no food)'
+                      : `; food ${this.describeFoodPrefs()}`)
         );
         this.status = 'start: bank';
     }
@@ -412,16 +439,30 @@ class ArdougneThiever extends LoopingBot {
         this.targetKey = target;
 
         this.eatAtHp = Math.max(1, Math.min(30, Math.round(readPrefNum('eatAtHp', this.eatAtHp))));
+        this.waitForHp = readPrefBool('waitForHp', this.waitForHp);
         this.useCake = readPrefBool('useCake', this.useCake);
         this.useChocolate = readPrefBool('useChocolate', this.useChocolate);
         this.foodWithdraw = Math.max(
             1,
             Math.min(27, Math.round(readPrefNum('foodWithdraw', this.foodWithdraw)))
         );
+        this.syncActiveFoodFromPrefs();
 
         if (!silent && prevTarget !== this.targetKey) {
             const cfg = this.targetCfg();
             this.log(`target → ${cfg.name} (need Thieving ${cfg.thieving})`);
+        }
+    }
+
+    /** Prefer cake when Use Cake is on; otherwise chocolate. Skipped after a bank fallback swap. */
+    syncActiveFoodFromPrefs() {
+        if (this.foodFallbackLocked) {
+            return;
+        }
+        if (this.useCake) {
+            this.activeFood = 'cake';
+        } else if (this.useChocolate) {
+            this.activeFood = 'choc';
         }
     }
 
@@ -438,8 +479,17 @@ class ArdougneThiever extends LoopingBot {
 
     /**
      * Cake-on: Slice → 2/3 → Cake. Chocolate is a separate toggle (after 2/3, before whole Cake).
+     * After a bank cake↔choc swap, stick to the active food family only.
      */
     foodPriorityNames() {
+        if (!this.foodEnabled()) {
+            return [];
+        }
+        if (this.foodFallbackLocked) {
+            return this.activeFood === 'choc'
+                ? [FOOD_CHOC]
+                : [FOOD_SLICE, FOOD_TWO_THIRDS, FOOD_CAKE];
+        }
         if (this.useCake && this.useChocolate) {
             return [FOOD_SLICE, FOOD_TWO_THIRDS, FOOD_CHOC, FOOD_CAKE];
         }
@@ -453,7 +503,7 @@ class ArdougneThiever extends LoopingBot {
     }
 
     foodEnabled() {
-        return this.foodPriorityNames().length > 0;
+        return this.useCake || this.useChocolate;
     }
 
     findBestFood() {
@@ -483,15 +533,129 @@ class ArdougneThiever extends LoopingBot {
         return Skills.effective('hitpoints') <= this.eatAtHp;
     }
 
-    /** Primary bank item to withdraw for restock. */
+    /**
+     * No-food mode: when waitForHp is on, pause thieving until HP regenerates above eatAtHp.
+     * Ignored while cake/choc food is enabled (eating / banking handle HP instead).
+     */
+    needHpWait() {
+        if (!this.waitForHp || this.foodEnabled()) {
+            return false;
+        }
+        return Skills.effective('hitpoints') <= this.eatAtHp;
+    }
+
+    /** Primary bank item name for logs (current active food family). */
     withdrawFoodName() {
-        if (this.useCake) {
-            return FOOD_CAKE;
+        if (!this.foodEnabled()) {
+            return null;
         }
-        if (this.useChocolate) {
-            return FOOD_CHOC;
+        return this.activeFood === 'choc' ? FOOD_CHOC : FOOD_CAKE;
+    }
+
+    /** Cake family withdraw order: whole Cake first, then leftovers. */
+    cakeWithdrawNames() {
+        return [FOOD_CAKE, FOOD_TWO_THIRDS, FOOD_SLICE];
+    }
+
+    /** Items to try withdrawing for the current active food family. */
+    activeWithdrawNames() {
+        if (!this.foodEnabled()) {
+            return [];
         }
+        return this.activeFood === 'choc' ? [FOOD_CHOC] : this.cakeWithdrawNames();
+    }
+
+    /** Items to try if the active family is empty in the bank. */
+    alternateWithdrawNames() {
+        return this.activeFood === 'choc' ? this.cakeWithdrawNames() : [FOOD_CHOC];
+    }
+
+    /**
+     * Build a withdraw list filling up to `amount` from `names` in order (may mix cake leftovers).
+     * @returns {{ name: string, take: number }[]}
+     */
+    buildWithdrawPlan(names, amount) {
+        let need = Math.max(0, amount);
+        let free = Inventory.free();
+        const plan = [];
+        for (const name of names) {
+            if (need <= 0 || free <= 0) {
+                break;
+            }
+            const inBank = Bank.count(name) || 0;
+            if (inBank <= 0) {
+                continue;
+            }
+            const take = Math.min(need, inBank, free);
+            if (take <= 0) {
+                continue;
+            }
+            plan.push({ name, take });
+            need -= take;
+            free -= take;
+        }
+        return plan;
+    }
+
+    /**
+     * Bank open: prefer active food (Cake → 2/3 → Slice, or Chocolate), else swap families.
+     * @returns {{ name: string, take: number }[] | null} plan, or null if no food in bank
+     */
+    resolveWithdrawPlan(amount) {
+        if (!this.foodEnabled() || amount <= 0) {
+            return null;
+        }
+
+        const primary = this.activeWithdrawNames();
+        let plan = this.buildWithdrawPlan(primary, amount);
+        if (plan.length > 0) {
+            if (this.activeFood === 'cake' && plan[0].name !== FOOD_CAKE) {
+                this.log(
+                    `no ${FOOD_CAKE} in bank — withdrawing ${plan.map(p => `${p.take}× ${p.name}`).join(', ')}`
+                );
+            }
+            return plan;
+        }
+
+        const alt = this.alternateWithdrawNames();
+        plan = this.buildWithdrawPlan(alt, amount);
+        if (plan.length > 0) {
+            const next = this.activeFood === 'choc' ? 'cake' : 'choc';
+            const label = plan.map(p => `${p.take}× ${p.name}`).join(', ');
+            this.log(`no ${this.withdrawFoodName()} family in bank — swapping to ${label}`);
+            this.activeFood = next;
+            this.foodFallbackLocked = true;
+            return plan;
+        }
+
         return null;
+    }
+
+    /** Withdraw according to resolveWithdrawPlan. @returns {Promise<boolean>} */
+    async withdrawResolvedFood(amount) {
+        const plan = this.resolveWithdrawPlan(amount);
+        if (!plan || plan.length === 0) {
+            return false;
+        }
+        for (const { name, take } of plan) {
+            this.log(`withdrawing ${take}× ${name}`);
+            if (!(await Bank.withdrawX(name, take))) {
+                this.log(`withdraw failed for ${name}`);
+                return false;
+            }
+            await Execution.delayTicks(1);
+        }
+        return true;
+    }
+
+    /** Out of cake family and chocolate in bank — stop rather than sit waiting forever. */
+    stopNoFood(context) {
+        this.status = 'no food — stopped';
+        this.log(
+            `${context}: no Cake / 2/3 cake / Slice of cake / Chocolate slice in bank — stopping ` +
+                '(restock food, then restart)'
+        );
+        stopScript();
     }
 
     needFoodBank() {
@@ -565,6 +729,13 @@ class ArdougneThiever extends LoopingBot {
             return;
         }
 
+        if (this.needHpWait()) {
+            const hp = Skills.effective('hitpoints');
+            this.status = `HP ${hp} — regen above ${this.eatAtHp}`;
+            await Execution.delayTicks(2);
+            return;
+        }
+
         if (this.stunned()) {
             this.status = 'stunned';
             await Execution.delayTicks(1);
@@ -620,9 +791,26 @@ class ArdougneThiever extends LoopingBot {
 
     /**
      * Script start: if inventory already has foodWithdraw of enabled food, skip bank.
+     * With food off (wait-for-HP / no cakes), skip bank and walk to the target.
      * Otherwise unequip → deposit inventory → withdraw food → go thieve.
      */
     async prepStartBank() {
+        if (!this.foodEnabled()) {
+            this.startReady = true;
+            const cfg = this.targetCfg();
+            this.status = `walking to ${cfg.name}`;
+            this.log(
+                `start: food off` +
+                    (this.waitForHp ? ` (wait HP ≤ ${this.eatAtHp})` : '') +
+                    ` — skipping bank, walking to ${cfg.anchor.x},${cfg.anchor.z} for ${cfg.name}`
+            );
+            await Traversal.walkResilient(cfg.anchor, {
+                radius: 3,
+                log: m => this.log(`  ${m}`)
+            });
+            return;
+        }
+
         if (this.hasEnoughStartFood()) {
             this.startReady = true;
             const cfg = this.targetCfg();
@@ -682,23 +870,13 @@ class ArdougneThiever extends LoopingBot {
         await Execution.delayTicks(1);
         this.refreshBankGp();
 
-        const want = this.withdrawFoodName();
-        if (want && this.foodWithdraw > 0) {
-            const inBank = Bank.count(want) || 0;
-            if (inBank <= 0) {
-                this.log(`WARNING: no ${want} in bank — add some, then restart / wait`);
+        if (this.foodEnabled() && this.foodWithdraw > 0) {
+            const need = Math.min(this.foodWithdraw, Inventory.free());
+            if (!(await this.withdrawResolvedFood(need))) {
                 await Bank.close();
-                await Execution.delayTicks(8);
+                this.stopNoFood('start');
                 return;
             }
-            const take = Math.min(this.foodWithdraw, inBank, Inventory.free());
-            this.log(`start: withdrawing ${take}× ${want}`);
-            if (!(await Bank.withdrawX(want, take))) {
-                this.log(`start: withdraw failed for ${want}`);
-                await Execution.delayTicks(2);
-                return;
-            }
-            await Execution.delayTicks(1);
         }
 
         this.refreshBankGp();
@@ -773,19 +951,25 @@ class ArdougneThiever extends LoopingBot {
     }
 
     /**
-     * Out of food → East Ardougne bank, deposit junk, withdraw foodWithdraw of Cake / Chocolate slice.
+     * Out of food → East Ardougne bank, deposit junk, withdraw foodWithdraw of cake family / chocolate.
+     * Cake order: Cake → 2/3 cake → Slice of cake. If that family is empty, swap to the other;
+     * if neither is in bank, stop the script.
      */
     async bankFoodRestock() {
-        const want = this.withdrawFoodName();
-        if (!want) {
+        if (!this.foodEnabled()) {
             return;
         }
 
         this.status = 'banking food';
         const cfg = this.targetCfg();
+        const prefer = this.withdrawFoodName();
 
         if (!Bank.isOpen()) {
-            this.log(`out of food — banking, withdraw ${this.foodWithdraw}× ${want}`);
+            this.log(
+                `out of food — banking, withdraw up to ${this.foodWithdraw}× ${prefer}` +
+                    (this.activeFood === 'cake' ? ` / ${FOOD_TWO_THIRDS} / ${FOOD_SLICE}` : '') +
+                    ` (fallback ${this.activeFood === 'cake' ? FOOD_CHOC : 'cake family'})`
+            );
             if (
                 !(await Banking.open({
                     stand: BANK_STAND,
@@ -810,21 +994,11 @@ class ArdougneThiever extends LoopingBot {
         const have = this.foodCount();
         const need = Math.max(0, this.foodWithdraw - have);
         if (need > 0) {
-            const inBank = Bank.count(want) || 0;
-            if (inBank <= 0) {
-                this.log(`WARNING: no ${want} in bank — add some, then continue`);
+            if (!(await this.withdrawResolvedFood(need))) {
                 await Bank.close();
-                await Execution.delayTicks(8);
+                this.stopNoFood('restock');
                 return;
             }
-            const take = Math.min(need, inBank, Inventory.free());
-            this.log(`withdrawing ${take}× ${want}`);
-            if (!(await Bank.withdrawX(want, take))) {
-                this.log(`withdraw failed for ${want}`);
-                await Execution.delayTicks(2);
-                return;
-            }
-            await Execution.delayTicks(1);
         }
 
         this.refreshBankGp();
@@ -868,11 +1042,17 @@ class ArdougneThiever extends LoopingBot {
         const cfg = this.targetCfg();
         const hp = Skills.effective('hitpoints');
 
+        const hpMode = this.foodEnabled()
+            ? `eat ≤ ${this.eatAtHp}  ·  food ${this.foodCount()}/${this.foodWithdraw}`
+            : this.waitForHp
+              ? `wait ≤ ${this.eatAtHp}  ·  food off`
+              : `HP thresh ${this.eatAtHp}  ·  food off`;
+
         const lines = [
             `Benzyme's Ardougne Thiever`,
             `Time ${fmtElapsed(elapsed)}  ·  ${this.status}`,
             `Target ${cfg.name}  ·  Thieving ${Skills.level('thieving')}`,
-            `HP ${hp}/${Skills.level('hitpoints')}  ·  eat ≤ ${this.eatAtHp}  ·  food ${this.foodCount()}/${this.foodWithdraw}`,
+            `HP ${hp}/${Skills.level('hitpoints')}  ·  ${hpMode}`,
             `steals ${this.steals}  fails ${this.fails}  eats ${this.eats}  banks ${this.bankTrips}`,
             `GP stolen ${fmtGp(this.gpStolen)}  ·  bank ${fmtGp(this.bankGp)}gp`,
             `XP ${fmtXph(xph)}/hr  (+${Math.round(xp)} xp)`
@@ -896,11 +1076,11 @@ class ArdougneThiever extends LoopingBot {
 
 export default defineBot({
     name: SCRIPT_NAME,
-    version: '1.0.0',
+    version: '1.3.0',
     category: 'Thieving',
     tags: ['thieving', 'ardougne', 'pickpocket', 'man', 'guard', 'warrior', 'cake'],
     description:
-        "Benzyme's Ardougne Thiever — pickpocket Men, Warrior women, or Ardougne guards; optional cake/choc food with HP eat slider",
+        "Benzyme's Ardougne Thiever — pickpocket Men, Warrior women, or Ardougne guards; cake/choc food or wait-for-HP regen with shared HP threshold slider",
     settingsSchema: {
         target: {
             type: 'string',
@@ -915,9 +1095,16 @@ export default defineBot({
             default: 10,
             min: 1,
             max: 30,
-            label: 'Eat at hitpoints',
+            label: 'Hitpoints threshold',
             group: 'Food',
-            help: 'Eat enabled food when current HP is at or below this value (1–30)'
+            help: 'With food on: eat at or below this HP. With Wait for HP regen on (and cake/choc off): pause thieving until HP regenerates above this (1–30)'
+        },
+        waitForHp: {
+            type: 'boolean',
+            default: false,
+            label: 'Wait for HP regen (no food)',
+            group: 'Food',
+            help: 'For accounts with no cakes: when Cake and Chocolate are both off, pause pickpocketing at/below the Hitpoints threshold until HP regenerates. Ignored while food is enabled. PLEASE UNTICK USING CAKE AND CHOCOLATE SLICE OTHERWISE WE WILL SIT AT THE BANK WAITING FOR FOOD THAT WILL NEVER COME :('
         },
         useCake: {
             type: 'boolean',
@@ -940,7 +1127,7 @@ export default defineBot({
             max: 27,
             label: 'Amount to withdraw',
             group: 'Food',
-            help: 'When out of food, bank and withdraw this many Cake (or Chocolate slice if Cake is off)'
+            help: 'When out of food, bank and withdraw this many of the active food. Cake order: Cake → 2/3 cake → Slice of cake (can mix). If that family is empty, auto-swaps to Chocolate (or cake family); stops if neither is in the bank.'
         }
     },
     create: () => new ArdougneThiever()

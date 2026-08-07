@@ -126,7 +126,7 @@ async function dismissWelcomeScreen() {
 }
 
 const PICKPOCKET_OP = 'Pickpocket';
-const PAY_FARE_OP = 'Pay-fare';
+const TALK_OP = 'Talk-to';
 const STUN_RE = /been stunned|fail to pick/i;
 const STUN_TICKS = 9;
 
@@ -146,8 +146,54 @@ const BRIMHAVEN_DOCK = new Tile(2772, 3227, 0);
 /** Soft "done" pin in East Ardougne. */
 const ARDOUGNE_TOWN = new Tile(2663, 3303, 0);
 
+/** Port Sarim dock sailors (stand out front of the Karamja boat). */
 const SARIM_SAILORS = ['Captain Tobias', 'Seaman Lorris', 'Seaman Thresnor'];
-const BRIM_CAPTAIN = 'Captain Barnaby';
+/**
+ * Brimhaven → Ardougne dock NPCs.
+ * Pre–Pirate's Treasure accounts talk to Customs officer (search + 30gp).
+ * Captain Barnaby is used on newer worlds if present.
+ */
+const BRIM_SAILORS = ['Customs officer', 'Customs Officer', 'Captain Barnaby'];
+
+/** Tobias / Seamen: Yes please → (optional) Musa Point. No Pirate's Treasure needed. */
+const KARAMJA_DIALOG_PREFER = [
+    'musa point',
+    'karamja',
+    'yes please',
+    'yes'
+];
+/**
+ * Brimhaven leave dialogue (no Pirate's Treasure):
+ *   Can I journey on this ship? → Search away, I have nothing to hide. → Ok.
+ * Also supports Barnaby: I'd like to go to Ardougne.
+ */
+const ARDOUGNE_DIALOG_PREFER = [
+    'search away',
+    'nothing to hide',
+    'can i journey',
+    'journey on this ship',
+    'ardougne',
+    "i'd like to go to ardougne",
+    'ok',
+    'okay',
+    'yes please',
+    'yes'
+];
+const DIALOG_AVOID = [
+    'no, thank',
+    'no thank',
+    "i'm good",
+    'nowhere',
+    'rimmington',
+    'pandemonium',
+    'actually, i don',
+    'pay you nothing',
+    'not bother',
+    'unusual customs',
+    'personal use',
+    "you're not putting",
+    'why?'
+];
 
 const PHASE = {
     THIEVE: 'thieve',
@@ -221,19 +267,43 @@ function regionOf(tile) {
     return 'unknown';
 }
 
+function dialogAvoid(opt) {
+    const low = (opt ?? '').toLowerCase();
+    return DIALOG_AVOID.some(a => low.includes(a));
+}
+
 function pickBoatOption(options, prefer) {
     const prefs = Array.isArray(prefer) ? prefer : [prefer];
+    const usable = options.filter(o => !dialogAvoid(o));
+    const pool = usable.length > 0 ? usable : options;
     for (const p of prefs) {
-        const hit = options.find(o => (o ?? '').toLowerCase().includes(p.toLowerCase()));
+        const hit = pool.find(o => (o ?? '').toLowerCase().includes(p.toLowerCase()));
         if (hit) {
             return hit;
         }
     }
-    const yes = options.find(o => /^yes/i.test(o ?? ''));
+    const yes = pool.find(o => /^yes/i.test(o ?? ''));
     if (yes) {
         return yes;
     }
-    return options.length > 0 ? options[0] : null;
+    return pool.length > 0 ? pool[0] : null;
+}
+
+function dialogOpen() {
+    if (ChatDialog.canContinue()) {
+        return true;
+    }
+    return (
+        typeof ChatDialog.isOpen === 'function' &&
+        ChatDialog.isOpen() &&
+        typeof ChatDialog.options === 'function' &&
+        ChatDialog.options().length > 0
+    );
+}
+
+function talkOp(npc) {
+    const acts = typeof npc.actions === 'function' ? npc.actions() : [];
+    return acts.find(a => /^talk/i.test(a ?? '')) ?? TALK_OP;
 }
 
 class SneakyArdougne extends LoopingBot {
@@ -277,7 +347,8 @@ class SneakyArdougne extends LoopingBot {
 
         this.log(
             `SneakyArdougne — pickpocket Lumbridge Men until ${this.gpTarget}gp ` +
-                `(wait if HP < ${this.minHp}), then Port Sarim → Karamja → Brimhaven → Ardougne`
+                `(wait if HP < ${this.minHp}), then Port Sarim → Karamja → Brimhaven → Ardougne ` +
+                `(no Pirate's Treasure — Customs search dialogue at Brimhaven)`
         );
         this.log(`start phase: ${this.phase} · coins ${invCoins()}gp · region ${regionOf(Game.tile())}`);
         this.status = this.phase;
@@ -378,13 +449,26 @@ class SneakyArdougne extends LoopingBot {
     }
 
     /**
-     * Drive ship / sailor chat. Prefer destination keywords, else Yes.
+     * One dialog click (continue or choose). Used for stray chat outside boat rides.
      * @returns {Promise<boolean>} true if dialog was handled this tick
      */
     async handleDialog() {
+        const prefer =
+            this.phase === PHASE.BOAT_ARDOUGNE || regionOf(Game.tile()) === 'brimhaven'
+                ? ARDOUGNE_DIALOG_PREFER
+                : KARAMJA_DIALOG_PREFER;
+        return this.stepSailorDialog(prefer);
+    }
+
+    /**
+     * Single dialog step: continue NPC text, or pick a travel option.
+     * @returns {Promise<boolean>} true if we acted on an open dialog
+     */
+    async stepSailorDialog(prefer) {
         if (ChatDialog.canContinue()) {
             this.status = 'continue dialog';
             await ChatDialog.continue();
+            await Execution.delayTicks(1);
             return true;
         }
         if (
@@ -395,10 +479,6 @@ class SneakyArdougne extends LoopingBot {
             typeof ChatDialog.chooseOption === 'function'
         ) {
             const opts = ChatDialog.options();
-            let prefer = ['yes please', 'yes', 'karamja', 'musa'];
-            if (this.phase === PHASE.BOAT_ARDOUGNE || regionOf(Game.tile()) === 'brimhaven') {
-                prefer = ['ardougne', 'yes please', 'yes'];
-            }
             const pick = pickBoatOption(opts, prefer);
             this.status = `dialog: ${pick ?? '?'}`;
             this.log(`dialog → ${pick}  [${opts.join(' | ')}]`);
@@ -411,6 +491,66 @@ class SneakyArdougne extends LoopingBot {
             return true;
         }
         return false;
+    }
+
+    /**
+     * Talk-to a dock sailor, then walk their dialogue until we land (or chat ends).
+     * @param {object} npc
+     * @param {string[]} prefer dialog option keywords
+     * @param {() => boolean} arrivedFn true when the boat trip succeeded
+     */
+    async talkSailorAndRide(npc, prefer, arrivedFn) {
+        const before = Game.tile();
+        const coinsBefore = invCoins();
+        const op = talkOp(npc);
+        this.status = `Talk-to ${npc.name ?? 'sailor'}`;
+        this.log(`Talk-to ${npc.name} @ dock (${coinsBefore}gp) — navigating dialogue`);
+
+        if (!(await npc.interact(op))) {
+            await Execution.delayTicks(2);
+            return false;
+        }
+
+        if (
+            !(await Execution.delayUntil(
+                () => dialogOpen() || arrivedFn() || this.movedFar(before, 15),
+                8000
+            ))
+        ) {
+            this.log('sailor dialog did not open — retrying');
+            return false;
+        }
+
+        for (let i = 0; i < 40; i++) {
+            if (arrivedFn()) {
+                return true;
+            }
+            if (!dialogOpen()) {
+                if (
+                    await Execution.delayUntil(
+                        () => arrivedFn() || this.movedFar(before, 15) || dialogOpen(),
+                        6000
+                    )
+                ) {
+                    if (arrivedFn()) {
+                        return true;
+                    }
+                    if (dialogOpen()) {
+                        continue;
+                    }
+                }
+                break;
+            }
+            if (!(await this.stepSailorDialog(prefer))) {
+                await Execution.delayTicks(1);
+            }
+        }
+
+        if (arrivedFn()) {
+            return true;
+        }
+        await this.crossGangplank();
+        return arrivedFn();
     }
 
     async doThieve() {
@@ -528,8 +668,13 @@ class SneakyArdougne extends LoopingBot {
         }
     }
 
+    onKaramja() {
+        const r = regionOf(Game.tile());
+        return r === 'musa' || r === 'karamja';
+    }
+
     async doBoatKaramja() {
-        if (regionOf(Game.tile()) === 'musa' || regionOf(Game.tile()) === 'karamja') {
+        if (this.onKaramja()) {
             this.log('arrived Musa Point / Karamja — walking to Brimhaven');
             this.phase = PHASE.WALK_BRIMHAVEN;
             return;
@@ -543,7 +688,15 @@ class SneakyArdougne extends LoopingBot {
             return;
         }
 
-        if (await this.crossGangplank()) {
+        // Finish any leftover sailor chat from a previous attempt.
+        if (dialogOpen()) {
+            for (let i = 0; i < 40 && dialogOpen() && !this.onKaramja(); i++) {
+                await this.stepSailorDialog(KARAMJA_DIALOG_PREFER);
+            }
+            if (this.onKaramja()) {
+                this.phase = PHASE.WALK_BRIMHAVEN;
+                this.log('boat landed on Karamja');
+            }
             return;
         }
 
@@ -559,49 +712,13 @@ class SneakyArdougne extends LoopingBot {
             return;
         }
 
-        const before = Game.tile();
-        const coinsBefore = invCoins();
-        const fareOp = this.fareOp(sailor);
-        this.status = `${fareOp} → Karamja`;
-        this.log(`${fareOp} ${sailor.name} for Karamja (${coinsBefore}gp)`);
-
-        if (!(await sailor.interact(fareOp))) {
-            await Execution.delayTicks(2);
-            return;
-        }
-
-        await Execution.delayUntil(
-            () =>
-                ChatDialog.canContinue() ||
-                (typeof ChatDialog.isOpen === 'function' &&
-                    ChatDialog.isOpen() &&
-                    typeof ChatDialog.options === 'function' &&
-                    ChatDialog.options().length > 0) ||
-                regionOf(Game.tile()) === 'musa' ||
-                regionOf(Game.tile()) === 'karamja' ||
-                invCoins() < coinsBefore ||
-                this.movedFar(before, 20),
-            8000
+        const ok = await this.talkSailorAndRide(sailor, KARAMJA_DIALOG_PREFER, () =>
+            this.onKaramja()
         );
-
-        if (await this.handleDialog()) {
-            await Execution.delayUntil(
-                () =>
-                    regionOf(Game.tile()) === 'musa' ||
-                    regionOf(Game.tile()) === 'karamja' ||
-                    this.movedFar(before, 20),
-                12_000
-            );
-        }
-
-        if (regionOf(Game.tile()) === 'musa' || regionOf(Game.tile()) === 'karamja') {
+        if (ok || this.onKaramja()) {
             this.phase = PHASE.WALK_BRIMHAVEN;
             this.log('boat landed on Karamja');
-            return;
         }
-
-        await this.crossGangplank();
-        await Execution.delayTicks(2);
     }
 
     findSarimSailor() {
@@ -615,8 +732,12 @@ class SneakyArdougne extends LoopingBot {
             Npcs.query()
                 .within(18)
                 .where(n => {
-                    const acts = typeof n.actions === 'function' ? n.actions() : [];
-                    return acts.some(a => /pay-?fare/i.test(a ?? ''));
+                    const nm = (n.name ?? '').toLowerCase();
+                    return (
+                        nm.includes('captain') ||
+                        nm.includes('seaman') ||
+                        nm.includes('sailor')
+                    );
                 })
                 .nearest() ?? null
         );
@@ -648,8 +769,12 @@ class SneakyArdougne extends LoopingBot {
         }
     }
 
+    inArdougne() {
+        return regionOf(Game.tile()) === 'ardougne';
+    }
+
     async doBoatArdougne() {
-        if (regionOf(Game.tile()) === 'ardougne') {
+        if (this.inArdougne()) {
             this.log('arrived Ardougne');
             this.phase = PHASE.DONE;
             return;
@@ -662,13 +787,20 @@ class SneakyArdougne extends LoopingBot {
             return;
         }
 
-        if (await this.crossGangplank()) {
+        if (dialogOpen()) {
+            for (let i = 0; i < 40 && dialogOpen() && !this.inArdougne(); i++) {
+                await this.stepSailorDialog(ARDOUGNE_DIALOG_PREFER);
+            }
+            if (this.inArdougne()) {
+                this.phase = PHASE.DONE;
+                this.log('boat landed in Ardougne');
+            }
             return;
         }
 
-        const cap = this.findBarnaby();
-        if (!cap) {
-            this.status = 'looking for Barnaby';
+        const sailor = this.findBrimSailor();
+        if (!sailor) {
+            this.status = 'looking for dock sailor';
             await Traversal.walkResilient(BRIMHAVEN_DOCK, {
                 radius: 3,
                 timeoutMs: 10_000,
@@ -678,69 +810,43 @@ class SneakyArdougne extends LoopingBot {
             return;
         }
 
-        const before = Game.tile();
-        const coinsBefore = invCoins();
-        const fareOp = this.fareOp(cap);
-        this.status = `${fareOp} → Ardougne`;
-        this.log(`${fareOp} ${cap.name} for Ardougne (${coinsBefore}gp)`);
-
-        if (!(await cap.interact(fareOp))) {
-            await Execution.delayTicks(2);
-            return;
-        }
-
-        await Execution.delayUntil(
-            () =>
-                ChatDialog.canContinue() ||
-                (typeof ChatDialog.isOpen === 'function' &&
-                    ChatDialog.isOpen() &&
-                    typeof ChatDialog.options === 'function' &&
-                    ChatDialog.options().length > 0) ||
-                regionOf(Game.tile()) === 'ardougne' ||
-                invCoins() < coinsBefore ||
-                this.movedFar(before, 20),
-            8000
+        const ok = await this.talkSailorAndRide(sailor, ARDOUGNE_DIALOG_PREFER, () =>
+            this.inArdougne()
         );
-
-        if (await this.handleDialog()) {
-            await Execution.delayUntil(
-                () => regionOf(Game.tile()) === 'ardougne' || this.movedFar(before, 20),
-                12_000
-            );
-        }
-
-        if (regionOf(Game.tile()) === 'ardougne') {
+        if (ok || this.inArdougne()) {
             this.phase = PHASE.DONE;
             this.log('boat landed in Ardougne');
-            return;
         }
-
-        await this.crossGangplank();
-        await Execution.delayTicks(2);
     }
 
-    findBarnaby() {
+    findBrimSailor() {
+        for (const name of BRIM_SAILORS) {
+            const npc = Npcs.query().name(name).within(18).nearest();
+            if (npc) {
+                return npc;
+            }
+        }
+        // Prefer Customs (pre–Pirate's Treasure leave ship) over random captains.
+        const customs = Npcs.query()
+            .within(18)
+            .where(n => (n.name ?? '').toLowerCase().includes('customs'))
+            .nearest();
+        if (customs) {
+            return customs;
+        }
         return (
-            Npcs.query().name(BRIM_CAPTAIN).within(18).nearest() ??
             Npcs.query()
                 .within(18)
                 .where(n => {
-                    const acts = typeof n.actions === 'function' ? n.actions() : [];
-                    return acts.some(a => /pay-?fare/i.test(a ?? ''));
+                    const nm = (n.name ?? '').toLowerCase();
+                    return (
+                        nm.includes('captain') ||
+                        nm.includes('seaman') ||
+                        nm.includes('sailor')
+                    );
                 })
-                .nearest() ??
-            null
+                .nearest() ?? null
         );
-    }
-
-    fareOp(npc) {
-        const acts = typeof npc.actions === 'function' ? npc.actions() : [];
-        const pay = acts.find(a => /pay-?fare/i.test(a ?? ''));
-        if (pay) {
-            return pay;
-        }
-        const talk = acts.find(a => /^talk/i.test(a ?? ''));
-        return talk ?? 'Talk-to';
     }
 
     movedFar(from, tiles) {
@@ -860,7 +966,7 @@ export default defineBot({
         'travel'
     ],
     description:
-        'Pickpocket Lumbridge Men until 60gp (regen HP to 5+), then boat Port Sarim → Karamja → Brimhaven → Ardougne',
+        "Pickpocket Lumbridge Men until 60gp (regen HP to 5+), then boat Port Sarim → Karamja → Brimhaven → Ardougne. Works without Pirate's Treasure (Customs search at Brimhaven).",
     settingsSchema: {},
     create: () => new SneakyArdougne()
 });

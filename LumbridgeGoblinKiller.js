@@ -138,10 +138,6 @@ const TOWARD_SLACK = 4;
 /** Side-panel tab indices (rs2b0t Game.openSideTab). */
 const STATS_TAB = 1;
 
-/** Drunken Dwarf gifts — consume so they don't clog the pack. */
-const DWARF_BEER = 'Beer';
-const DWARF_KEBAB = 'Kebab';
-
 /** Melee styles that train a single combat skill (1:1 with the skill name). */
 const TRAINABLE = ['attack', 'strength', 'defence'];
 /** Skills we may show XP/hr for once they gain XP this session. */
@@ -592,8 +588,8 @@ class LumbridgeGoblinKiller extends LoopingBot {
             }
         }
 
-        // Drink/eat Drunken Dwarf gifts before banking so they aren't deposited.
-        if (await this.handleDwarfGifts()) {
+        // Drop Beer / Kebab / Casket — never eat or drink them.
+        if (await this.handleDropJunk()) {
             return;
         }
 
@@ -680,7 +676,7 @@ class LumbridgeGoblinKiller extends LoopingBot {
     onPaint(ctx) {
         const elapsed = Date.now() - this.startedAt;
         const lines = [
-            `Benzyme's Goblin Killer v1.9.0`,
+            `Benzyme's Goblin Killer v1.9.1`,
             `time ${fmtElapsed(elapsed)}  ·  ${this.status}`,
             `deaths ${this.deaths}`
         ];
@@ -1062,40 +1058,34 @@ class LumbridgeGoblinKiller extends LoopingBot {
     }
 
     /**
-     * Drink Beer / eat Kebab from the Drunken Dwarf (or any leftover gifts).
-     * @returns {Promise<boolean>} true if this loop consumed a gift
+     * Drop Beer, Kebab, and any Casket from the pack (never Drink/Eat).
+     * @returns {Promise<boolean>} true if this loop dropped something
      */
-    async handleDwarfGifts() {
-        const beer =
-            Inventory.first(DWARF_BEER) ??
+    async handleDropJunk() {
+        const item =
             Inventory.items().find(i => {
                 const n = (i.name ?? '').toLowerCase();
+                if (!n) {
+                    return false;
+                }
+                if (n === 'kebab' || n === 'casket' || n.includes('casket')) {
+                    return true;
+                }
+                // Plain Beer / dwarf beer — not kegs or other drinks.
                 return n === 'beer' || (n.includes('beer') && !n.includes('keg'));
-            }) ??
-            null;
-        if (beer) {
-            this.status = 'drink beer';
-            this.log('Drunken Dwarf gift — drinking Beer');
-            const before = Inventory.used();
-            await beer.interact('Drink');
-            await Execution.delayUntil(() => Inventory.used() < before || !Inventory.first(DWARF_BEER), 4000);
-            return true;
+            }) ?? null;
+
+        if (!item) {
+            return false;
         }
 
-        const kebab =
-            Inventory.first(DWARF_KEBAB) ??
-            Inventory.items().find(i => (i.name ?? '').toLowerCase() === 'kebab') ??
-            null;
-        if (kebab) {
-            this.status = 'eat kebab';
-            this.log('Drunken Dwarf gift — eating Kebab');
-            const before = Inventory.used();
-            await kebab.interact('Eat');
-            await Execution.delayUntil(() => Inventory.used() < before || !Inventory.first(DWARF_KEBAB), 4000);
-            return true;
-        }
-
-        return false;
+        const name = item.name ?? 'junk';
+        this.status = `drop ${name}`;
+        this.log(`dropping ${name}`);
+        const before = Inventory.used();
+        await item.interact('Drop');
+        await Execution.delayUntil(() => Inventory.used() < before, 4000);
+        return true;
     }
 
     /**
@@ -1273,20 +1263,14 @@ class LumbridgeGoblinKiller extends LoopingBot {
         return GEAR.every(g => Equipment.contains(g) || Inventory.first(g));
     }
 
-    /** Inventory stacks that are only Bronze sword, Wooden shield, Bones, Coins, and/or dwarf gifts. */
+    /** Inventory stacks that are only Bronze sword, Wooden shield, Bones, and/or Coins. */
     invOnlyGearOrBones() {
         return Inventory.items().every(i => {
             const n = (i.name ?? '').toLowerCase();
             if (!n) {
                 return false;
             }
-            if (
-                n === 'bones' ||
-                n === 'coins' ||
-                n === 'beer' ||
-                n === 'kebab' ||
-                (n.includes('beer') && !n.includes('keg'))
-            ) {
+            if (n === 'bones' || n === 'coins') {
                 return true;
             }
             return GEAR.some(g => g.toLowerCase() === n);
@@ -1660,11 +1644,11 @@ class LumbridgeGoblinKiller extends LoopingBot {
 
 export default defineBot({
     name: SCRIPT_NAME,
-    version: '1.9.0',
+    version: '1.9.1',
     category: 'Combat',
     tags: ['goblin', 'lumbridge', 'melee', 'death-recovery', 'xp', 'prayer', 'bank', 'draynor'],
     description:
-        "Benzyme's Goblin Killer — Draynor gear bank first; goblin camp leash; stats tab open; drinks Drunken Dwarf beer/kebab; no cow-field bone chasing",
+        "Benzyme's Goblin Killer — Draynor gear bank first; drops Beer/Kebab/Casket; goblin camp leash; stats tab open; no cow-field bone chasing",
     settingsSchema: {
         buryBones: {
             type: 'boolean',
