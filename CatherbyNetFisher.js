@@ -1,5 +1,6 @@
 /**
  * CatherbyNetFisher — small-net shrimp at Catherby (Net+Bait spots only).
+ * Start: unequip all → bank everything → withdraw Small fishing net only.
  * Optional cook on the bank-house Range on the way to the bank, then bank + return.
  * Completely vibe coded by @.benzyme on Discord via Cursor AI
  * Self-contained ESM for rs2b0t Load local script / Load URL.
@@ -24,6 +25,7 @@ const {
     Locs,
     GroundItems,
     Inventory,
+    Equipment,
     Bank,
     Banking,
     Traversal,
@@ -382,6 +384,23 @@ function hasNet() {
     return Inventory.items().some(i => isKeepTool(i.name));
 }
 
+function nothingEquipped() {
+    return Equipment.items().every(i => !i.name);
+}
+
+/** Inventory holds only fishing net(s) — nothing else. */
+function inventoryOnlyNet() {
+    const items = Inventory.items().filter(i => i.name);
+    if (items.length === 0) {
+        return false;
+    }
+    return items.every(i => isKeepTool(i.name));
+}
+
+function readyToFish() {
+    return hasNet() && inventoryOnlyNet() && nothingEquipped();
+}
+
 function netOp(actions) {
     return actions.find(a => /^net$/i.test(a)) ?? null;
 }
@@ -425,6 +444,8 @@ class CatherbyNetFisher extends LoopingBot {
     /** Total successfully cooked fish this session (not burnt). */
     cooked = 0;
     bankTrips = 0;
+    /** False until unequip + bank-all + withdraw net finishes. */
+    startReady = false;
     /** Preference: cook on Range before banking. */
     cookOnWay = true;
     cookingLoad = false;
@@ -445,6 +466,7 @@ class CatherbyNetFisher extends LoopingBot {
         this.caught = 0;
         this.cooked = 0;
         this.bankTrips = 0;
+        this.startReady = false;
         this.cookingLoad = false;
         this.lastRawSeen = rawFishCount();
 
@@ -455,13 +477,11 @@ class CatherbyNetFisher extends LoopingBot {
         });
 
         this.log(
-            `CatherbyNetFisher @ ${ANCHOR.x},${ANCHOR.z} — Net+Bait shrimp only; ` +
+            `CatherbyNetFisher @ ${ANCHOR.x},${ANCHOR.z} — first unequip + bank all, ` +
+                `withdraw Small fishing net only; Net+Bait shrimp; ` +
                 `cook on way to bank: ${this.cookOnWay ? 'on' : 'off'}`
         );
-        if (!hasNet()) {
-            this.log('WARNING: no Small fishing net in inventory');
-        }
-        this.status = 'ready';
+        this.status = 'start: bank';
     }
 
     startPausedPrefUnlock() {
@@ -529,6 +549,11 @@ class CatherbyNetFisher extends LoopingBot {
             return;
         }
 
+        if (!this.startReady) {
+            await this.prepStartInv();
+            return;
+        }
+
         if (Bank.isOpen()) {
             await Bank.close();
             return;
@@ -552,8 +577,8 @@ class CatherbyNetFisher extends LoopingBot {
                 this.log('looted Small fishing net');
                 return;
             }
-            this.log('no Small fishing net — withdraw one, then continue');
-            await Execution.delayTicks(8);
+            this.log('no Small fishing net — banking to withdraw one');
+            await this.bankAndReturn();
             return;
         }
 
@@ -907,6 +932,121 @@ class CatherbyNetFisher extends LoopingBot {
         }
     }
 
+    /**
+     * Script start: unequip everything → deposit inventory → withdraw Small fishing net → shore.
+     * Skips the bank trip when already net-only with nothing equipped.
+     */
+    async prepStartInv() {
+        if (readyToFish()) {
+            this.startReady = true;
+            this.status = 'returning to shore';
+            this.log('start ready (skip bank) — Small fishing net only, nothing equipped');
+            await Traversal.walkResilient(ANCHOR, {
+                radius: 3,
+                log: m => this.log(`  ${m}`)
+            });
+            return;
+        }
+
+        this.status = 'start: unequip';
+
+        for (const worn of Equipment.items()) {
+            const name = worn.name;
+            if (!name) {
+                continue;
+            }
+            this.log(`start: unequipping ${name}`);
+            if (!(await Equipment.unequip(name))) {
+                this.log(`start: could not unequip ${name}`);
+                await Execution.delayTicks(1);
+                return;
+            }
+            await Execution.delayTicks(1);
+        }
+
+        if (!Bank.isOpen()) {
+            this.log('start: opening bank — deposit all, withdraw Small fishing net');
+            if (
+                !(await Banking.open({
+                    stand: BANK_STAND,
+                    log: m => this.log(`  ${m}`)
+                }))
+            ) {
+                this.log('start: could not open bank — retrying');
+                await Execution.delayTicks(3);
+                return;
+            }
+        }
+
+        if (typeof Bank.loaded === 'function') {
+            await Execution.delayUntil(() => Bank.loaded() || Bank.items().length > 0, 3000);
+        }
+        await Execution.delayTicks(1);
+
+        this.log('start: depositing inventory');
+        if (typeof Bank.depositInventory === 'function') {
+            await Bank.depositInventory();
+        } else {
+            await Bank.depositAllMatching(() => true);
+        }
+        await Execution.delayTicks(1);
+
+        if (!(await this.withdrawNetFromOpenBank())) {
+            await Bank.close();
+            await Execution.delayTicks(8);
+            return;
+        }
+
+        await Bank.close();
+        this.bankTrips++;
+        this.startReady = true;
+        this.lastRawSeen = rawFishCount();
+        this.status = 'returning to shore';
+        this.log('start done — Small fishing net only, nothing equipped; walking to shore');
+        await Traversal.walkResilient(ANCHOR, {
+            radius: 3,
+            log: m => this.log(`  ${m}`)
+        });
+    }
+
+    /** Withdraw one Small fishing net from an already-open bank. */
+    async withdrawNetFromOpenBank() {
+        if (!Bank.isOpen()) {
+            return false;
+        }
+        if (hasNet()) {
+            return true;
+        }
+
+        await Execution.delayUntil(() => Bank.loaded() || !Bank.isOpen(), 3000);
+        if (!Bank.isOpen()) {
+            return false;
+        }
+
+        const inBank = Bank.count(NET_NAME) || 0;
+        if (inBank <= 0) {
+            // Soft match — bank may label it slightly differently.
+            const soft = Bank.items().find(i => isKeepTool(i.name) || isNetGroundName(i.name));
+            if (!soft?.name) {
+                this.log('WARNING: no Small fishing net in bank — put one in, then continue');
+                return false;
+            }
+            this.log(`withdrawing ${soft.name}`);
+            if (!(await Bank.withdrawX(soft.name, 1))) {
+                this.log(`withdraw failed for ${soft.name}`);
+                return false;
+            }
+        } else {
+            this.log(`withdrawing ${NET_NAME}`);
+            if (!(await Bank.withdrawX(NET_NAME, 1))) {
+                this.log(`withdraw failed for ${NET_NAME}`);
+                return false;
+            }
+        }
+        await Execution.delayTicks(1);
+        return hasNet();
+    }
+
     async bankAndReturn() {
         const raw = rawFishCount();
         const cooked = cookedFishCount();
@@ -915,19 +1055,34 @@ class CatherbyNetFisher extends LoopingBot {
             `banking` +
                 (raw ? ` ${raw} raw` : '') +
                 (cooked ? ` ${cooked} cooked` : '') +
-                (burntCount() ? ` ${burntCount()} burnt` : '')
+                (burntCount() ? ` ${burntCount()} burnt` : '') +
+                ` — keep Small fishing net only`
         );
 
         // After banking raw, lastRawSeen must not credit re-withdraws as new catches.
         this.lastRawSeen = 0;
 
+        // Strip worn gear so deposit can bank it too.
+        for (const worn of Equipment.items()) {
+            const name = worn.name;
+            if (!name) {
+                continue;
+            }
+            this.log(`banking: unequipping ${name}`);
+            if (!(await Equipment.unequip(name))) {
+                this.log(`banking: could not unequip ${name}`);
+                await Execution.delayTicks(1);
+                return;
+            }
+            await Execution.delayTicks(1);
+        }
+
         await Banking.bankNearest({
             destination: { name: 'Catherby', tile: BANK_STAND },
-            deposit: name => {
-                if (isKeepTool(name)) {
-                    return false;
-                }
-                return isBankableFish(name);
+            // Bank everything (including spare nets), then pull exactly one net back.
+            deposit: () => true,
+            afterDeposit: async () => {
+                await this.withdrawNetFromOpenBank();
             },
             returnTo: ANCHOR,
             log: m => this.log(`  ${m}`)
@@ -976,11 +1131,11 @@ class CatherbyNetFisher extends LoopingBot {
 
 export default defineBot({
     name: SCRIPT_NAME,
-    version: '2.0.0',
+    version: '2.1.0',
     category: 'Fishing',
     tags: ['fishing', 'catherby', 'net', 'shrimp', 'bank', 'cook'],
     description:
-        "Benzyme's Catherby Fisher — small-net shrimp at Net+Bait spots only. Optional cook on bank-house Range on the way to bank. Shows total caught/cooked and per-hour rates.",
+        "Benzyme's Catherby Fisher — unequips and banks everything, withdraws Small fishing net only, then small-net shrimp at Net+Bait spots. Optional cook on bank-house Range on the way to bank.",
     settingsSchema: {
         cookOnWay: {
             type: 'boolean',

@@ -1,6 +1,7 @@
 /**
  * WalkingBot — walk to a chosen town pin and stop.
- * Destinations: Port Sarim, Draynor Village, Catherby, Ardougne.
+ * Destinations: Port Sarim, Draynor, Catherby, Ardougne, Seers, Falador,
+ * Rimmington, Varrock, Barbarian Village, Edgeville, Taverley.
  * Completely vibe coded by @.benzyme on Discord via Cursor AI
  * Self-contained ESM for rs2b0t Load local script / Load URL.
  */
@@ -17,7 +18,7 @@ if (abi.apiVersion !== SUPPORTED_API_VERSION) {
 
 const { defineBot, Execution, Game, LoopingBot, Traversal, Tile } = abi;
 
-const SCRIPT_NAME = 'WalkingBot';
+const SCRIPT_NAME = "Benzyme's Walker";
 
 /** Post-login welcome modal interface id (Close Window top-right). */
 const WELCOME_SCREEN_ID = 5993;
@@ -105,7 +106,14 @@ const DESTINATIONS = [
     { name: 'Port Sarim', tile: new Tile(3028, 3235, 0) },
     { name: 'Draynor Village', tile: new Tile(3094, 3244, 0) },
     { name: 'Catherby', tile: new Tile(2809, 3440, 0) },
-    { name: 'Ardougne', tile: new Tile(2663, 3303, 0) }
+    { name: 'Ardougne', tile: new Tile(2663, 3303, 0) },
+    { name: 'Seers Village', tile: new Tile(2702, 3484, 0) },
+    { name: 'Falador', tile: new Tile(2963, 3382, 0) },
+    { name: 'Rimmington', tile: new Tile(2956, 3214, 0) },
+    { name: 'Varrock', tile: new Tile(3213, 3425, 0) },
+    { name: 'Barbarian Village', tile: new Tile(3084, 3420, 0) },
+    { name: 'Edgeville', tile: new Tile(3093, 3493, 0) },
+    { name: 'Taverley', tile: new Tile(2899, 3458, 0) }
 ];
 
 const DEST_NAMES = DESTINATIONS.map(d => d.name);
@@ -197,6 +205,16 @@ function fmtElapsed(ms) {
     return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+function sameTile(a, b) {
+    return (
+        !!a &&
+        !!b &&
+        a.x === b.x &&
+        a.z === b.z &&
+        (a.level ?? 0) === (b.level ?? 0)
+    );
+}
+
 class WalkingBot extends LoopingBot {
     status = 'starting';
     destName = DEFAULT_DEST;
@@ -206,6 +224,8 @@ class WalkingBot extends LoopingBot {
     arrived = false;
     tripStartDist = 0;
     startedAt = 0;
+    /** Bumped whenever Destination changes — aborts walks aimed at the old pin. */
+    walkEpoch = 0;
     /** @type {ReturnType<typeof setInterval> | null} */
     unlockTimer = null;
 
@@ -234,7 +254,13 @@ class WalkingBot extends LoopingBot {
 
     startPausedPrefUnlock() {
         unlockPausedPrefsUi();
-        this.unlockTimer = setInterval(() => unlockPausedPrefsUi(), 400);
+        this.unlockTimer = setInterval(() => {
+            unlockPausedPrefsUi();
+            // Loop is suspended while paused — keep Dest / radius live from panel edits.
+            if (isPanelPaused()) {
+                this.syncPrefs({ silent: true });
+            }
+        }, 400);
     }
 
     onStop() {
@@ -247,6 +273,7 @@ class WalkingBot extends LoopingBot {
 
     syncPrefs({ silent = false, resetTrip = false } = {}) {
         const prevName = this.destName;
+        const prevTarget = this.target;
         const prevRadius = this.radius;
 
         this.destName = readPrefStr(
@@ -265,11 +292,16 @@ class WalkingBot extends LoopingBot {
         this.destName = dest.name;
         this.target = dest.tile;
 
-        const destChanged = prevName !== this.destName;
+        const destChanged =
+            prevName !== this.destName || !sameTile(prevTarget, this.target);
         if (destChanged || resetTrip) {
             this.arrived = false;
             const here = Game.tile();
             this.tripStartDist = here && this.target ? this.target.distanceTo(here) : 0;
+            if (destChanged) {
+                this.walkEpoch++;
+                this.status = `walking to ${this.destName}`;
+            }
             if (!silent && destChanged) {
                 this.log(
                     `prefs: destination → ${this.destName} @ ${this.target.x},${this.target.z}`
@@ -318,36 +350,53 @@ class WalkingBot extends LoopingBot {
             return;
         }
 
+        // Snapshot the pin this chunk is walking toward. Short timeouts so a
+        // Destination change (pause → edit → resume) abandons the old path
+        // instead of finishing a long trek to the previous town.
+        const epoch = this.walkEpoch;
+        const destName = this.destName;
+        const target = this.target;
+        const radius = this.radius;
+
         this.arrived = false;
-        this.status = `walking to ${this.destName}`;
+        this.status = `walking to ${destName}`;
         this.log(
-            `walking to ${this.destName} @ ${this.target.x},${this.target.z} (${dist}t away)`
+            `walking to ${destName} @ ${target.x},${target.z} (${dist}t away)`
         );
 
-        const ok = await Traversal.walkResilient(this.target, {
-            radius: this.radius,
-            attempts: 4,
-            timeoutMs: 180_000,
+        const ok = await Traversal.walkResilient(target, {
+            radius,
+            attempts: 2,
+            timeoutMs: 12_000,
             log: m => this.log(`  ${m}`)
         });
 
+        this.syncPrefs({ silent: true });
+        if (this.walkEpoch !== epoch || !sameTile(this.target, target)) {
+            this.log(`changed mind — now walking to ${this.destName}`);
+            return;
+        }
+
         const after = Game.tile();
-        if (after && this.target.distanceTo(after) <= this.radius) {
+        if (after && target.distanceTo(after) <= radius) {
             this.arrived = true;
-            this.status = `arrived at ${this.destName}`;
+            this.status = `arrived at ${destName}`;
             this.log(
-                `arrived at ${this.destName} (${after.x}, ${after.z}, ${after.level})`
+                `arrived at ${destName} (${after.x}, ${after.z}, ${after.level})`
             );
             return;
         }
 
         if (!ok) {
-            this.status = `stuck — retry ${this.destName}`;
-            this.log(`path failed toward ${this.destName} — retrying`);
+            this.status = `stuck — retry ${destName}`;
+            this.log(`path failed toward ${destName} — retrying`);
         }
     }
 
     onPaint(ctx) {
+        // Host snapshots settings at Start; re-read so pause/run param edits show on Dest.
+        this.syncPrefs({ silent: true });
+
         const here = Game.tile();
         const dist = here && this.target ? this.target.distanceTo(here) : -1;
         const elapsed = this.startedAt ? fmtElapsed(Date.now() - this.startedAt) : '0:00';
@@ -360,9 +409,8 @@ class WalkingBot extends LoopingBot {
         const pct = Math.round(progress * 100);
 
         const lines = [
-            `WalkingBot — ${this.status}`,
-            `Dest: ${this.destName}` +
-                (this.target ? ` (${this.target.x},${this.target.z})` : ''),
+            `Benzyme's Walker`,
+            `Dest: ${this.destName}`,
             this.arrived
                 ? 'ARRIVED'
                 : dist >= 0
@@ -391,9 +439,23 @@ export default defineBot({
     name: SCRIPT_NAME,
     version: '1.0.0',
     category: 'Utility',
-    tags: ['walk', 'travel', 'port sarim', 'draynor', 'catherby', 'ardougne'],
+    tags: [
+        'walk',
+        'travel',
+        'port sarim',
+        'draynor',
+        'catherby',
+        'ardougne',
+        'seers',
+        'falador',
+        'rimmington',
+        'varrock',
+        'barbarian village',
+        'edgeville',
+        'taverley'
+    ],
     description:
-        "Benzyme's Walker — walks to Port Sarim, Draynor Village, Catherby, or Ardougne and stops",
+        "Benzyme's Walker — walks to a chosen town pin (Port Sarim, Draynor, Catherby, Ardougne, Seers, Falador, Rimmington, Varrock, Barbarian Village, Edgeville, Taverley) and stops",
     settingsSchema: {
         destination: {
             type: 'string',
