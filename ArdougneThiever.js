@@ -1,5 +1,5 @@
 /**
- * ArdougneThiever — pickpocket Warrior women / Guards in East Ardougne.
+ * ArdougneThiever — pickpocket Men / Warrior women / Guards in East Ardougne.
  * Completely vibe coded by @.benzyme on Discord via Cursor AI
  * Self-contained ESM for rs2b0t Load local script / Load URL.
  */
@@ -123,6 +123,13 @@ const STUN_TICKS = 9;
 const BANK_STAND = new Tile(2655, 3286, 0);
 
 const TARGETS = {
+    Man: {
+        name: 'Man',
+        npcId: null,
+        thieving: 1,
+        anchor: new Tile(2625, 3291, 0),
+        leash: 14
+    },
     'Warrior woman': {
         name: 'Warrior woman',
         /** Classic / RS2B cache id. */
@@ -869,9 +876,9 @@ export default defineBot({
     name: SCRIPT_NAME,
     version: '1.0.0',
     category: 'Thieving',
-    tags: ['thieving', 'ardougne', 'pickpocket', 'guard', 'warrior', 'cake'],
+    tags: ['thieving', 'ardougne', 'pickpocket', 'man', 'guard', 'warrior', 'cake'],
     description:
-        "Benzyme's Ardougne Thiever — pickpocket Warrior women or Guards; optional cake/choc food with HP eat slider",
+        "Benzyme's Ardougne Thiever — pickpocket Men, Warrior women, or Guards; optional cake/choc food with HP eat slider",
     settingsSchema: {
         target: {
             type: 'string',
@@ -879,7 +886,7 @@ export default defineBot({
             options: TARGET_OPTIONS,
             label: 'Pickpocket target',
             group: 'Thieving',
-            help: 'Warrior woman id 15 at 2630,3297 (Thieving 25) or Guard in East Ardougne (Thieving 40)'
+            help: 'Man at 2625,3291 (Thieving 1), Warrior woman id 15 at 2630,3297 (Thieving 25), or Guard in East Ardougne (Thieving 40)'
         },
         eatAtHp: {
             type: 'number',
