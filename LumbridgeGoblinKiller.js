@@ -36,14 +36,8 @@ const SCRIPT_NAME = 'LumbridgeGoblinKiller';
 /** Outdoor goblin camp — south of the house door (3246,3244). */
 const GOBLIN_SPOT = new Tile(3246, 3242, 0);
 const LEASH = 12;
-/**
- * Goblin house interior (ground floor). Door @ 3246,3244 faces south —
- * do not voluntarily Attack goblins inside these bounds (or upstairs).
- */
-const HOUSE_X0 = 3243;
-const HOUSE_X1 = 3248;
-const HOUSE_Z0 = 3245;
-const HOUSE_Z1 = 3249;
+/** Goblin house door — keep this Open whenever we're at camp. */
+const HOUSE_DOOR = new Tile(3246, 3244, 0);
 const GEAR = ['Bronze sword', 'Wooden shield'];
 const DEATH_RE = /oh dear.*you are dead/i;
 const CANT_REACH_RE = /i can't reach that/i;
@@ -79,21 +73,16 @@ function npcTargetsMe(n) {
     return typeof n.targetsMe === 'function' && !!n.targetsMe();
 }
 
-/** True when the tile is inside the goblin house (skip these for voluntary attacks). */
-function isInsideGoblinHouse(tile) {
-    if (!tile) {
-        return false;
-    }
-    const level = tile.level ?? 0;
-    if (level > 0) {
-        return true;
-    }
-    return (
-        tile.x >= HOUSE_X0 &&
-        tile.x <= HOUSE_X1 &&
-        tile.z >= HOUSE_Z0 &&
-        tile.z <= HOUSE_Z1
-    );
+function npcTargetsAnother(n) {
+    return typeof n.targetsAnotherPlayer === 'function' && !!n.targetsAnotherPlayer();
+}
+
+function hasAttackOp(n) {
+    return n.actions().some(a => /attack/i.test(a ?? ''));
+}
+
+function isSpiderNpc(n) {
+    return (n.name ?? '').toLowerCase().includes('spider');
 }
 
 function fmtXph(n) {
@@ -235,6 +224,13 @@ class LumbridgeGoblinKiller extends LoopingBot {
     styleRetryAt = 0;
     cantReach = false;
     buried = 0;
+    /** When the current attacker started hitting us with no retaliate click. */
+    underAttackSince = 0;
+    /** @type {number} */
+    lastAttackerIndex = -1;
+    /** NPC index we last clicked Attack on (counts as fighting back). */
+    retaliatingIndex = -1;
+    retaliateClickedAt = 0;
     /** @type {ReturnType<typeof setInterval> | null} */
     unlockTimer = null;
 
@@ -260,6 +256,10 @@ class LumbridgeGoblinKiller extends LoopingBot {
         this.usedSkills = new Set();
         this.buried = 0;
         this.gearReady = false;
+        this.underAttackSince = 0;
+        this.lastAttackerIndex = -1;
+        this.retaliatingIndex = -1;
+        this.retaliateClickedAt = 0;
         for (const skill of COMBAT_TRACK) {
             this.xpAtStart[skill] = Skills.xp(skill);
         }
@@ -294,7 +294,10 @@ class LumbridgeGoblinKiller extends LoopingBot {
                 : `started — fixed style ${this.desiredStyle}`
         );
         this.log(`bury bones: ${this.buryBones ? 'on' : 'off'}`);
-        this.log('first: bank all → withdraw/equip Bronze sword + Wooden shield');
+        this.log(
+            'first: bank all → withdraw/equip Bronze sword + Wooden shield ' +
+                '(skipped if pack is only sword/shield/bones/coins)'
+        );
         this.log('tip: Pause → Edit parameters to change prefs without stopping');
         this.status = 'gear: bank';
     }
@@ -358,9 +361,14 @@ class LumbridgeGoblinKiller extends LoopingBot {
             return;
         }
 
+        // Being hit without fighting back for 5s → click Attack on that NPC.
+        if (await this.ensureRetaliate()) {
+            return;
+        }
+
         if (Tile.from(here).distanceTo(GOBLIN_SPOT) > LEASH) {
             this.status = 'walking to goblins';
-            this.log('walking to outdoor goblins');
+            this.log('walking to goblins');
             const ok = await Traversal.walkResilient(GOBLIN_SPOT, {
                 radius: 4,
                 log: msg => this.log(`  ${msg}`)
@@ -368,6 +376,11 @@ class LumbridgeGoblinKiller extends LoopingBot {
             if (!ok) {
                 this.log('path to goblins failed — retrying');
             }
+            return;
+        }
+
+        // Keep the house door open whenever we're at camp (even mid-fight).
+        if (await this.ensureHouseDoorOpen()) {
             return;
         }
 
@@ -408,8 +421,9 @@ class LumbridgeGoblinKiller extends LoopingBot {
     onPaint(ctx) {
         const elapsed = Date.now() - this.startedAt;
         const lines = [
-            `Benzyme's Goblin Killer v1.6  ${this.desiredStyle}  atk ${this.attacks}  deaths ${this.deaths}`,
-            `time ${fmtElapsed(elapsed)}  ·  ${this.status}`
+            `Benzyme's Goblin Killer v1.6`,
+            `time ${fmtElapsed(elapsed)}  ·  ${this.status}`,
+            `deaths ${this.deaths}`
         ];
 
         if (this.buryBones) {
@@ -422,6 +436,8 @@ class LumbridgeGoblinKiller extends LoopingBot {
                 `auto-lowest · ${gained}/${this.levelsBeforeSwap} lv on ${this.desiredStyle}`
             );
         }
+
+        lines.push(`Currently training ${this.desiredStyle.toUpperCase()}`);
 
         const hrs = elapsed / 3_600_000;
         for (const skill of COMBAT_TRACK) {
@@ -511,21 +527,17 @@ class LumbridgeGoblinKiller extends LoopingBot {
     }
 
     /**
-     * Attack an outdoor goblin. On "I can't reach that!" open the blocking door and retry.
+     * Attack a goblin. On "I can't reach that!" open the blocking door and retry.
      */
     async attackGoblin(goblin) {
         const index = goblin.index;
         const targetTile = goblin.tile();
-        if (isInsideGoblinHouse(targetTile) && !npcTargetsMe(goblin)) {
-            this.log(`skipping house goblin @ ${targetTile.x},${targetTile.z}`);
-            await Execution.delayTicks(1);
-            return;
-        }
 
         this.status = `attacking (${goblin.distance()}t)`;
         this.log(`attacking Goblin @ ${targetTile.x},${targetTile.z}`);
         this.cantReach = false;
         await goblin.interact('Attack');
+        this.noteRetaliateClick(goblin.index);
         await Execution.delayUntil(
             () => Game.inCombat() || this.cantReach || this.findGoblinFightingMe() !== null,
             4000
@@ -562,6 +574,7 @@ class LumbridgeGoblinKiller extends LoopingBot {
         this.log(`retrying Goblin @ ${again.tile().x},${again.tile().z}`);
         this.cantReach = false;
         await again.interact('Attack');
+        this.noteRetaliateClick(again.index);
         if (
             await Execution.delayUntil(
                 () => Game.inCombat() || this.cantReach || this.findGoblinFightingMe() !== null,
@@ -574,6 +587,101 @@ class LumbridgeGoblinKiller extends LoopingBot {
         }
     }
 
+    noteRetaliateClick(index) {
+        this.retaliatingIndex = index;
+        this.retaliateClickedAt = Date.now();
+        this.underAttackSince = 0;
+        this.lastAttackerIndex = index;
+    }
+
+    /**
+     * Goblin / spider / any Attackable NPC on us.
+     * Uses targetsMe, plus sticky in-combat (faceEntity flickers between hits) —
+     * spiders near the house often need the sticky check.
+     */
+    findNpcAttackingMe() {
+        const range = LEASH + 12;
+        const targeting = Npcs.query()
+            .within(range)
+            .where(n => hasAttackOp(n))
+            .where(n => npcTargetsMe(n))
+            .nearest();
+        if (targeting) {
+            return targeting;
+        }
+
+        // faceEntity often clears between hits — keep spiders/goblins that are
+        // mid-fight in our face and not clearly on someone else.
+        const sticky = Npcs.query()
+            .within(4)
+            .where(n => hasAttackOp(n))
+            .where(n => n.inCombat && !npcTargetsAnother(n))
+            .nearest();
+        if (sticky) {
+            return sticky;
+        }
+
+        // Explicit spider scan a bit further (multi-combat packs).
+        return (
+            Npcs.query()
+                .within(range)
+                .where(n => isSpiderNpc(n))
+                .where(n => hasAttackOp(n))
+                .where(n => npcTargetsMe(n) || (n.inCombat && !npcTargetsAnother(n) && n.distance() <= 3))
+                .nearest() ?? null
+        );
+    }
+
+    /**
+     * If an NPC (goblin, spider, etc.) has been attacking us for 5s without us
+     * clicking Attack back, click Attack on them.
+     * @returns {Promise<boolean>} true if this loop spent time retaliating
+     */
+    async ensureRetaliate() {
+        const attacker = this.findNpcAttackingMe();
+        if (!attacker) {
+            this.underAttackSince = 0;
+            this.lastAttackerIndex = -1;
+            return false;
+        }
+
+        // We already clicked Attack on this NPC recently — treat as fighting back.
+        if (
+            attacker.index === this.retaliatingIndex &&
+            Date.now() - this.retaliateClickedAt < 12_000
+        ) {
+            this.underAttackSince = 0;
+            this.lastAttackerIndex = attacker.index;
+            return false;
+        }
+
+        if (attacker.index !== this.lastAttackerIndex || this.underAttackSince === 0) {
+            this.lastAttackerIndex = attacker.index;
+            this.underAttackSince = Date.now();
+            return false;
+        }
+
+        const waited = Date.now() - this.underAttackSince;
+        if (waited < 5000) {
+            return false;
+        }
+
+        const name = attacker.name ?? 'NPC';
+        this.status = `retaliating (${name})`;
+        this.log(
+            `${name} attacking for ${Math.round(waited / 1000)}s without retaliate — clicking Attack`
+        );
+        this.cantReach = false;
+        await attacker.interact('Attack');
+        this.noteRetaliateClick(attacker.index);
+        await Execution.delayUntil(
+            () => Game.animating() || Game.inCombat() || this.cantReach,
+            3000
+        );
+        this.attacks++;
+        return true;
+    }
+
     /** Goblin currently targeting the player (real fight, not a stale combat flag). */
     findGoblinFightingMe() {
         return Npcs.query()
@@ -584,8 +692,8 @@ class LumbridgeGoblinKiller extends LoopingBot {
     }
 
     /**
-     * Prefer the goblin already on us (re-engage after random events), else an idle outdoor one.
-     * Never start a fight on a goblin already in combat with someone else, or inside the house.
+     * Prefer the goblin already on us (re-engage after random events), else an idle one.
+     * Never start a fight on a goblin already in combat with someone else.
      */
     findAttackableGoblin() {
         const onMe = this.findGoblinFightingMe();
@@ -597,8 +705,40 @@ class LumbridgeGoblinKiller extends LoopingBot {
             .action('Attack')
             .within(LEASH + 4)
             .where(n => !n.inCombat)
-            .where(n => !isInsideGoblinHouse(n.tile()))
             .nearest();
+    }
+
+    /** Shut Door loc at the goblin house entrance, if any. */
+    findShutHouseDoor() {
+        return (
+            Locs.query()
+                .where(l => isShutDoor(l))
+                .within(10)
+                .where(l => {
+                    const t = l.tile();
+                    return (
+                        Math.abs(t.x - HOUSE_DOOR.x) <= 1 &&
+                        Math.abs(t.z - HOUSE_DOOR.z) <= 1 &&
+                        (t.level ?? 0) === (HOUSE_DOOR.level ?? 0)
+                    );
+                })
+                .nearest() ?? null
+        );
+    }
+
+    /**
+     * If the house door is shut while we're at camp, open it.
+     * @returns {Promise<boolean>} true if this loop spent time on the door
+     */
+    async ensureHouseDoorOpen() {
+        const shut = this.findShutHouseDoor();
+        if (!shut) {
+            return false;
+        }
+        this.status = 'opening house door';
+        this.log('house door shut — opening');
+        await this.openDoorToward(HOUSE_DOOR, shut);
+        return true;
     }
 
     findShutDoorToward(toward) {
@@ -802,14 +942,96 @@ class LumbridgeGoblinKiller extends LoopingBot {
         return GEAR.every(g => Equipment.contains(g));
     }
 
+    hasGearAvailable() {
+        return GEAR.every(g => Equipment.contains(g) || Inventory.first(g));
+    }
+
+    /** Inventory stacks that are only Bronze sword, Wooden shield, Bones, and/or Coins. */
+    invOnlyGearOrBones() {
+        return Inventory.items().every(i => {
+            const n = (i.name ?? '').toLowerCase();
+            if (!n) {
+                return false;
+            }
+            if (n === 'bones' || n === 'coins') {
+                return true;
+            }
+            return GEAR.some(g => g.toLowerCase() === n);
+        });
+    }
+
+    /** Worn slots are empty or only Bronze sword / Wooden shield. */
+    wornOnlyGear() {
+        const allowed = new Set(GEAR.map(n => n.toLowerCase()));
+        return Equipment.items()
+            .filter(i => i.name)
+            .every(i => allowed.has((i.name ?? '').toLowerCase()));
+    }
+
+    /**
+     * Pack is only sword/shield/bones/coins (or empty), worn is only sword/shield,
+     * and both gear pieces are equipped or in the pack — skip the bank trip.
+     */
+    canSkipBankPrep() {
+        return this.invOnlyGearOrBones() && this.wornOnlyGear() && this.hasGearAvailable();
+    }
+
     /**
      * Startup (and when gear is missing): unequip → deposit all → withdraw GEAR → equip.
+     * Skips banking when pack is only sword/shield/bones/coins and gear is already held;
+     * buries any bones, then equips, then fights.
      * After gearReady, only re-equip from the pack if something was removed.
      * @returns {Promise<boolean>} true if this loop spent time on gear
      */
     async prepCombatGear() {
         if (this.gearReady) {
             return await this.ensureGear();
+        }
+
+        if (this.canSkipBankPrep()) {
+            // Bury bones before wielding so the pack is clean for combat.
+            while (Inventory.first('Bones')) {
+                const bones = Inventory.first('Bones');
+                if (!bones) {
+                    break;
+                }
+                this.status = 'burying bones';
+                const before = Inventory.used();
+                await bones.interact('Bury');
+                if (await Execution.delayUntil(() => Inventory.used() < before, 3000)) {
+                    this.buried++;
+                    this.log(`buried bones (#${this.buried})`);
+                } else {
+                    await Execution.delayTicks(1);
+                    return true;
+                }
+            }
+
+            for (const item of GEAR) {
+                if (Equipment.contains(item)) {
+                    continue;
+                }
+                if (!Inventory.first(item)) {
+                    continue;
+                }
+                this.status = `gear: equip ${item}`;
+                if (await Equipment.equip(item)) {
+                    this.log(`gear: equipped ${item}`);
+                } else {
+                    this.log(`WARNING: could not equip ${item}`);
+                    await Execution.delayTicks(1);
+                    return true;
+                }
+                await Execution.delayTicks(1);
+            }
+
+            if (this.hasGearEquipped()) {
+                this.gearReady = true;
+                this.status = 'ready';
+                this.log('gear ready (skip bank) — Bronze sword + Wooden shield; heading to goblins');
+                return false;
+            }
+            // Fall through to bank if something still missing after bury/equip.
         }
 
         this.status = 'gear: bank';
