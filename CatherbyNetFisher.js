@@ -131,6 +131,24 @@ function unlockPausedPrefsUi() {
     }
 }
 
+const PAINT_FONT_ID = 'benzyme-catherby-font-v3';
+const PAINT_FONT = '13px Exo, "Bebas Neue", "Bitcount Ink", sans-serif';
+
+/** Load Exo (+ Bebas Neue / Bitcount Ink) from Google Fonts onto the bot page (once). */
+function ensurePaintFont() {
+    if (typeof document === 'undefined') {
+        return;
+    }
+    if (document.getElementById(PAINT_FONT_ID)) {
+        return;
+    }
+    const style = document.createElement('style');
+    style.id = PAINT_FONT_ID;
+    style.textContent =
+        "@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Bitcount+Ink:wght@100..900&family=Exo:ital,wght@0,100..900;1,100..900&display=swap');";
+    document.head.appendChild(style);
+}
+
 function isKeepTool(name) {
     if (!name) {
         return false;
@@ -335,6 +353,7 @@ class CatherbyNetFisher extends LoopingBot {
         await Execution.delayUntil(() => Game.ingame() && Game.tile() !== null, 0);
         Traversal.preload();
         this.startPausedPrefUnlock();
+        ensurePaintFont();
 
         this.syncPrefs({ silent: true });
         this.startedAt = Date.now();
@@ -834,6 +853,7 @@ class CatherbyNetFisher extends LoopingBot {
     }
 
     onPaint(ctx) {
+        ensurePaintFont();
         const elapsed = Date.now() - this.startedAt;
         const hrs = elapsed / 3_600_000;
         const fishXp = Skills.xp('fishing') - this.fishXpAtStart;
@@ -844,20 +864,20 @@ class CatherbyNetFisher extends LoopingBot {
         const cookedPh = hrs > 0.008 ? this.cooked / hrs : 0;
 
         const lines = [
-            `Catherby Shrimp  Fish ${Skills.level('fishing')}  Cook ${Skills.level('cooking')}`,
+            `Benzyme's Catherby Fisher  Fish ${Skills.level('fishing')}  Cook ${Skills.level('cooking')}`,
             `time ${fmtElapsed(elapsed)}  ·  ${this.cookOnWay ? 'cook→bank' : 'bank raw'}  ·  ${this.status}`,
             `caught ${this.caught} (${fmtXph(caughtPh)}/hr)  cooked ${this.cooked} (${fmtXph(cookedPh)}/hr)`,
             `trips ${this.bankTrips}  raw ${rawFishCount()}  Fish XP ${fmtXph(fishXph)}/hr` +
                 (this.cookOnWay || cookXp > 0 ? `  Cook XP ${fmtXph(cookXph)}/hr` : '')
         ];
 
-        ctx.font = '12px monospace';
+        ctx.font = PAINT_FONT;
         let maxW = 0;
         for (const line of lines) {
             maxW = Math.max(maxW, ctx.measureText(line).width);
         }
         const pad = 6;
-        const lineH = 16;
+        const lineH = 18;
         ctx.fillStyle = 'rgba(0,0,0,0.55)';
         ctx.fillRect(6, 6, maxW + pad * 2, pad * 2 + lines.length * lineH);
         ctx.fillStyle = '#7eb8da';
@@ -873,7 +893,7 @@ export default defineBot({
     category: 'Fishing',
     tags: ['fishing', 'catherby', 'net', 'shrimp', 'bank', 'cook'],
     description:
-        'Catherby small-net shrimp at Net+Bait spots only. Optional cook on bank-house Range on the way to bank. Shows total caught/cooked and per-hour rates.',
+        "Benzyme's Catherby Fisher — small-net shrimp at Net+Bait spots only. Optional cook on bank-house Range on the way to bank. Shows total caught/cooked and per-hour rates.",
     settingsSchema: {
         cookOnWay: {
             type: 'boolean',
