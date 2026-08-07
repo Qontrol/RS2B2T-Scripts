@@ -27,6 +27,18 @@ function welcomeHost() {
     return globalThis.rs2b0t ?? null;
 }
 
+/** Ask the host runner to stop this script (same as the Stop button). */
+function stopScript() {
+    const host = welcomeHost();
+    if (typeof host?.stopScript === 'function') {
+        host.stopScript();
+        return;
+    }
+    if (typeof host?.runner?.stop === 'function') {
+        host.runner.stop();
+    }
+}
+
 function isWelcomeModalOpen() {
     const host = welcomeHost();
     if (!host?.reader) {
@@ -339,14 +351,12 @@ class WalkingBot extends LoopingBot {
 
         const dist = this.target.distanceTo(here);
         if (dist <= this.radius) {
-            if (!this.arrived) {
-                this.arrived = true;
-                this.status = `arrived at ${this.destName}`;
-                this.log(
-                    `arrived at ${this.destName} (${here.x}, ${here.z}, ${here.level})`
-                );
-            }
-            await Execution.delayTicks(8);
+            this.arrived = true;
+            this.status = `arrived at ${this.destName}`;
+            this.log(
+                `arrived at ${this.destName} (${here.x}, ${here.z}, ${here.level}) — stopping`
+            );
+            stopScript();
             return;
         }
 
@@ -382,8 +392,9 @@ class WalkingBot extends LoopingBot {
             this.arrived = true;
             this.status = `arrived at ${destName}`;
             this.log(
-                `arrived at ${destName} (${after.x}, ${after.z}, ${after.level})`
+                `arrived at ${destName} (${after.x}, ${after.z}, ${after.level}) — stopping`
             );
+            stopScript();
             return;
         }
 
