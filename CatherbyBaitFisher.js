@@ -1,7 +1,7 @@
 /**
  * CatherbyBaitFisher — bait-rod sardine/herring at Catherby (Net+Bait spots only).
- * Withdraws Fishing rod + all Fishing bait from bank. Optional cook on bank-house Range,
- * optional sell catch to Harry instead of banking, then return to shore.
+ * Withdraws Fishing rod + all Fishing bait from bank. If out of bait, buys up to 500 from Harry.
+ * Optional cook on bank-house Range, optional sell catch to Harry instead of banking, then return to shore.
  * Completely vibe coded by @.benzyme on Discord via Cursor AI
  * Self-contained ESM for rs2b0t Load local script / Load URL.
  */
@@ -432,9 +432,12 @@ function coinCount() {
     return countMatching(isCoins);
 }
 
-/** How many bait to buy from Harry to reach BAIT_BUY_MAX (never above 500). */
+/** How many bait to buy from Harry when completely out (cap 500). */
 function baitBuyWant() {
-    return Math.max(0, BAIT_BUY_MAX - baitCount());
+    if (baitCount() > 0) {
+        return 0;
+    }
+    return BAIT_BUY_MAX;
 }
 
 function netOp(actions) {
@@ -653,8 +656,18 @@ class CatherbyBaitFisher extends LoopingBot {
                 return;
             }
             this.status = 'need gear';
-            this.log('missing rod/bait — banking for Fishing rod + all Fishing bait');
-            await this.bankRestockAndReturn();
+            if (!hasRod() || fishForDisposeCount() > 0 || !hasBait()) {
+                this.log(
+                    !hasBait()
+                        ? 'out of bait — bank first, then Harry if needed (max 500)'
+                        : 'missing rod — banking for Fishing rod + bait'
+                );
+                await this.bankRestockAndReturn();
+            }
+            if (!hasBait()) {
+                this.log(`still no bait — buying up to ${BAIT_BUY_MAX} from Harry`);
+                await this.buyBaitFromHarryAndReturn();
+            }
             return;
         }
 
@@ -1071,6 +1084,11 @@ class CatherbyBaitFisher extends LoopingBot {
             }
         }
 
+        // Top up bait from Harry while the shop is open (max 500).
+        if (baitBuyWant() > 0 && Shop.isOpen()) {
+            await this.buyBaitInOpenShop();
+        }
+
         if (Shop.isOpen()) {
             await Shop.close();
         }
@@ -1086,8 +1104,12 @@ class CatherbyBaitFisher extends LoopingBot {
         }
 
         // Cooked leftovers Harry won't buy — bank them + restock bait/rod.
-        if (cookedFishCount() > 0 || burntCount() > 0 || needsGear()) {
+        if (cookedFishCount() > 0 || burntCount() > 0 || !hasRod()) {
             await this.bankRestockAndReturn();
+            return;
+        }
+        if (!hasBait()) {
+            await this.buyBaitFromHarryAndReturn();
             return;
         }
 
@@ -1100,7 +1122,8 @@ class CatherbyBaitFisher extends LoopingBot {
     }
 
     /**
-     * Bank fish, withdraw Fishing rod (if needed) + Withdraw-All Fishing bait, return to shore.
+     * Bank fish, withdraw Fishing rod (if needed) + Withdraw-All Fishing bait.
+     * If bank has no bait, withdraw coins for a Harry top-up (max 500), then buy.
      */
     async bankRestockAndReturn() {
         const raw = rawFishCount();
@@ -1111,7 +1134,7 @@ class CatherbyBaitFisher extends LoopingBot {
                 (raw ? ` ${raw} raw` : '') +
                 (cooked ? ` ${cooked} cooked` : '') +
                 (burntCount() ? ` ${burntCount()} burnt` : '') +
-                ` — restock rod + all bait`
+                ` — restock rod + bait`
         );
 
         this.lastRawSeen = 0;
@@ -1119,29 +1142,169 @@ class CatherbyBaitFisher extends LoopingBot {
         await Banking.bankNearest({
             destination: { name: 'Catherby', tile: BANK_STAND },
             deposit: name => {
-                if (isKeepGear(name)) {
+                if (isKeepGear(name) || isCoins(name)) {
                     return false;
                 }
                 return isBankableFish(name);
             },
             afterDeposit: async () => await this.withdrawGearFromOpenBank(),
-            returnTo: ANCHOR,
+            // Stay near bank if we still need Harry for bait (don't walk to shore yet).
+            returnTo: null,
             log: m => this.log(`  ${m}`)
         });
 
         this.bankTrips++;
         this.cookingLoad = false;
         this.lastRawSeen = rawFishCount();
-        this.status = 'returning to shore';
 
         if (!hasRod()) {
             this.log('WARNING: still no Fishing rod after bank');
         }
+
         if (!hasBait()) {
-            this.log('WARNING: still no Fishing bait after bank — stock the bank');
-        } else {
-            this.log(`gear ready — rod + ${baitCount()} bait`);
+            this.log(`no bait in bank — buying up to ${BAIT_BUY_MAX} from Harry`);
+            await this.buyBaitFromHarryAndReturn();
+            return;
         }
+
+        this.log(`gear ready — rod + ${baitCount()} bait`);
+        this.status = 'returning to shore';
+        await Traversal.walkResilient(ANCHOR, {
+            radius: 3,
+            log: m => this.log(`  ${m}`)
+        });
+    }
+
+    /**
+     * Walk to Harry, buy Fishing bait up to BAIT_BUY_MAX, return to shore.
+     */
+    async buyBaitFromHarryAndReturn() {
+        const want = baitBuyWant();
+        if (want <= 0) {
+            this.status = 'returning to shore';
+            await Traversal.walkResilient(ANCHOR, {
+                radius: 3,
+                log: m => this.log(`  ${m}`)
+            });
+            return;
+        }
+
+        const needGp = want * BAIT_COST;
+        if (coinCount() < needGp) {
+            this.log(
+                `need ~${needGp}gp for ${want} bait (have ${coinCount()}) — withdrawing coins`
+            );
+            await this.withdrawCoinsForBait(needGp);
+        }
+
+        if (coinCount() < BAIT_COST) {
+            this.log('WARNING: not enough coins to buy bait from Harry');
+            this.status = 'need coins';
+            await Execution.delayTicks(8);
+            return;
+        }
+
+        this.status = 'walking to Harry (bait)';
+        this.log(`buying up to ${want} Fishing bait from Harry (cap ${BAIT_BUY_MAX})`);
+
+        await Traversal.walkResilient(HARRY_STAND, {
+            radius: 2,
+            log: m => this.log(`  ${m}`)
+        });
+        await this.openNearbyDoor();
+
+        this.status = 'buying bait';
+        if (!(await Shop.open(HARRY_NAME))) {
+            this.log('could not open Harry for bait — retrying next loop');
+            await Execution.delayTicks(3);
+            return;
+        }
+
+        await this.buyBaitInOpenShop();
+
+        if (Shop.isOpen()) {
+            await Shop.close();
+        }
+
+        if (!hasBait()) {
+            this.log('WARNING: still no Fishing bait after Harry — need coins or shop stock');
+            this.status = 'need bait';
+            await Execution.delayTicks(8);
+            return;
+        }
+
+        this.log(`bought bait — now holding ${baitCount()} (cap ${BAIT_BUY_MAX})`);
+        this.lastRawSeen = rawFishCount();
+        this.status = 'returning to shore';
+        await Traversal.walkResilient(ANCHOR, {
+            radius: 3,
+            log: m => this.log(`  ${m}`)
+        });
+    }
+
+    /** Buy Fishing bait from an already-open Harry shop, capped at BAIT_BUY_MAX total. */
+    async buyBaitInOpenShop() {
+        if (!Shop.isOpen()) {
+            return 0;
+        }
+        let want = baitBuyWant();
+        if (want <= 0) {
+            return 0;
+        }
+
+        // Affordability — don't try to buy more than coins allow.
+        const affordable = Math.floor(coinCount() / BAIT_COST);
+        if (affordable <= 0) {
+            this.log('cannot afford Fishing bait at Harry');
+            return 0;
+        }
+        want = Math.min(want, affordable);
+
+        const before = baitCount();
+        this.status = `buying bait x${want}`;
+        this.log(`Shop.buy ${want}× ${BAIT_NAME} (have ${before}, cap ${BAIT_BUY_MAX})`);
+        const bought = await Shop.buy(BAIT_NAME, want);
+        if (bought > 0) {
+            this.log(`bought ${bought}× ${BAIT_NAME} from Harry`);
+        } else {
+            this.log('Harry had no Fishing bait / buy failed');
+        }
+        return bought;
+    }
+
+    /** Open Catherby bank and withdraw enough coins to buy `needGp` worth of bait. */
+    async withdrawCoinsForBait(needGp) {
+        const short = Math.max(0, needGp - coinCount());
+        if (short <= 0) {
+            return;
+        }
+
+        await Banking.bankNearest({
+            destination: { name: 'Catherby', tile: BANK_STAND },
+            deposit: name => {
+                if (isKeepGear(name) || isCoins(name)) {
+                    return false;
+                }
+                return isBankableFish(name);
+            },
+            afterDeposit: async () => {
+                await Execution.delayUntil(() => Bank.loaded() || !Bank.isOpen(), 3000);
+                if (!Bank.isOpen()) {
+                    return;
+                }
+                const bankGp = Bank.count('Coins') || 0;
+                if (bankGp <= 0) {
+                    this.log('WARNING: no Coins in bank for Harry bait');
+                    return;
+                }
+                const take = Math.min(short, bankGp);
+                this.log(`withdrawing ${take} Coins for Harry bait`);
+                await Bank.withdrawX('Coins', take);
+                await Execution.delayTicks(1);
+            },
+            returnTo: null,
+            log: m => this.log(`  ${m}`)
+        });
     }
 
     async withdrawGearFromOpenBank() {
@@ -1183,7 +1346,21 @@ class CatherbyBaitFisher extends LoopingBot {
             await Bank.withdraw(BAIT_NAME, allOp);
             await Execution.delayUntil(() => baitCount() > before || !Bank.isOpen(), 4000);
         } else if (!hasBait()) {
-            this.log('WARNING: no Fishing bait in bank');
+            // Prepare coins for Harry (max 500 bait × cost).
+            const want = baitBuyWant();
+            const needGp = want * BAIT_COST;
+            const short = Math.max(0, needGp - coinCount());
+            const bankGp = Bank.count('Coins') || 0;
+            if (short > 0 && bankGp > 0) {
+                const take = Math.min(short, bankGp);
+                this.log(
+                    `no bank bait — withdrawing ${take} Coins for Harry (up to ${BAIT_BUY_MAX} bait)`
+                );
+                await Bank.withdrawX('Coins', take);
+                await Execution.delayTicks(1);
+            } else {
+                this.log('WARNING: no Fishing bait in bank');
+            }
         }
     }
 
@@ -1242,7 +1419,7 @@ export default defineBot({
     category: 'Fishing',
     tags: ['fishing', 'catherby', 'bait', 'sardine', 'herring', 'bank', 'cook', 'harry'],
     description:
-        "Benzyme's Catherby Bait Fisher — bait sardine/herring on Net+Bait spots only. Withdraws rod + all bait from bank. Optional cook on way; optional sell to Harry instead of banking.",
+        "Benzyme's Catherby Bait Fisher — bait sardine/herring on Net+Bait spots only. Withdraws rod + bait from bank; if out of bait, buys up to 500 from Harry. Optional cook on way; optional sell to Harry instead of banking.",
     settingsSchema: {
         cookOnWay: {
             type: 'boolean',
@@ -1258,7 +1435,7 @@ export default defineBot({
             label: 'Sell to Harry',
             group: 'Sell',
             help:
-                'Sell Raw sardine/herring to Harry at the Catherby fishing shop instead of banking, then return to bait fishing. Cooked leftovers (if cook-on-way is on) still bank. Restocks rod + all bait from bank when needed.'
+                'Sell Raw sardine/herring to Harry at the Catherby fishing shop instead of banking, then return to bait fishing. Cooked leftovers (if cook-on-way is on) still bank. Restocks rod from bank; buys up to 500 bait from Harry when bank bait is empty.'
         }
     },
     create: () => new CatherbyBaitFisher()
