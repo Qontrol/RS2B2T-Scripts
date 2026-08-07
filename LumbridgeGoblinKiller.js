@@ -493,21 +493,13 @@ class LumbridgeGoblinKiller extends LoopingBot {
         );
         this.log(`bury bones: ${this.buryBones ? 'on' : 'off'}`);
 
-        // Wait briefly for skill levels so we latch the fresh path correctly.
         await Execution.delayUntil(() => Skills.level('hitpoints') > 0, 5000);
         this.latchFreshStarter();
+        this.log(
+            `startup: one trip to Draynor ${DRAYNOR_BANK.x},${DRAYNOR_BANK.z},0 → gear up → goblins until death`
+        );
         this.log('tip: Pause → Edit parameters to change prefs without stopping');
-
-        // First action after detect: start walking to Draynor before the loop does anything else.
-        if (!this.gearReady && this.freshStarter !== null) {
-            this.status = 'walk to Draynor';
-            this.log(`first action: walk to ${DRAYNOR_BANK.x},${DRAYNOR_BANK.z},0`);
-            await Traversal.walkResilient(DRAYNOR_BANK, {
-                radius: 2,
-                timeoutMs: 180_000,
-                log: m => this.log(`  ${m}`)
-            });
-        }
+        this.status = 'walk to Draynor';
     }
 
     /** Detect combat 3 + total 28 once (also combat-3 base melee if total math differs). */
@@ -676,7 +668,7 @@ class LumbridgeGoblinKiller extends LoopingBot {
     onPaint(ctx) {
         const elapsed = Date.now() - this.startedAt;
         const lines = [
-            `Benzyme's Goblin Killer v1.9.1`,
+            `Benzyme's Goblin Killer v1.10`,
             `time ${fmtElapsed(elapsed)}  ·  ${this.status}`,
             `deaths ${this.deaths}`
         ];
@@ -1221,10 +1213,11 @@ class LumbridgeGoblinKiller extends LoopingBot {
 
         const haveGear = GEAR.every(g => Equipment.contains(g) || Inventory.first(g));
         if (!haveGear) {
+            // Only bank again after death if sword/shield are actually gone.
             this.gearReady = false;
-            this.log('gear missing after death — will bank + withdraw again');
+            this.log('gear missing after death — one Draynor bank trip, then back to goblins');
             this.recovering = false;
-            this.status = 'gear: bank';
+            this.status = 'walk to Draynor';
             return;
         }
 
@@ -1298,8 +1291,7 @@ class LumbridgeGoblinKiller extends LoopingBot {
      * @returns {Promise<boolean>} true if still traveling (caller should return)
      */
     async walkToDraynorFirst() {
-        const here = Game.tile();
-        if (distToDraynor(here) <= 4) {
+        if (distToDraynor(Game.tile()) <= 6) {
             return false;
         }
         if (Bank.isOpen()) {
@@ -1307,17 +1299,14 @@ class LumbridgeGoblinKiller extends LoopingBot {
             await Execution.delayTicks(1);
         }
         this.status = 'walk to Draynor';
-        this.log(`first action: walk to ${DRAYNOR_BANK.x},${DRAYNOR_BANK.z},0`);
-        const ok = await Traversal.walkResilient(DRAYNOR_BANK, {
+        this.log(`walking to Draynor @ ${DRAYNOR_BANK.x},${DRAYNOR_BANK.z},0 (one trip)`);
+        await Traversal.walkResilient(DRAYNOR_BANK, {
             radius: 2,
             timeoutMs: 180_000,
             log: m => this.log(`  ${m}`)
         });
-        if (!ok || distToDraynor(Game.tile()) > 6) {
-            this.log('failed to reach Draynor — retrying next loop');
-            await Execution.delayTicks(2);
-        }
-        return true;
+        // Still en route only if we failed to arrive — don't thrash at the booth.
+        return distToDraynor(Game.tile()) > 6;
     }
 
     /**
@@ -1354,7 +1343,97 @@ class LumbridgeGoblinKiller extends LoopingBot {
     }
 
     /**
-     * Fresh combat-3 / total-28: (1) walk to 3092,3244,0 first, (2) bank junk except GEAR.
+     * While the bank is open: withdraw any missing Bronze sword / Wooden shield.
+     * @returns {Promise<boolean>} true if both pieces are equipped or in the pack
+     */
+    async withdrawMissingGearFromOpenBank() {
+        if (!Bank.isOpen()) {
+            return this.hasGearAvailable();
+        }
+
+        if (typeof Bank.loaded === 'function') {
+            await Execution.delayUntil(
+                () => Bank.loaded() || (typeof Bank.items === 'function' && Bank.items().length > 0),
+                5000
+            );
+        }
+        await Execution.delayTicks(1);
+
+        for (const item of GEAR) {
+            if (Equipment.contains(item) || Inventory.first(item)) {
+                continue;
+            }
+
+            let inBank = typeof Bank.count === 'function' ? Bank.count(item) || 0 : 0;
+            if (inBank <= 0 && typeof Bank.items === 'function') {
+                const want = item.toLowerCase();
+                inBank = Bank.items().some(i => (i.name ?? '').toLowerCase() === want) ? 1 : 0;
+            }
+            if (inBank <= 0) {
+                this.log(`WARNING: no ${item} in open bank`);
+                continue;
+            }
+
+            this.status = `gear: withdraw ${item}`;
+            this.log(`gear: withdrawing ${item}`);
+            let ok = false;
+            if (typeof Bank.withdrawX === 'function') {
+                ok = !!(await Bank.withdrawX(item, 1));
+            }
+            if (!ok && typeof Bank.withdraw === 'function') {
+                ok = !!(await Bank.withdraw(item, 'Withdraw-1'));
+            }
+            if (!ok && typeof Bank.withdraw === 'function') {
+                ok = !!(await Bank.withdraw(item));
+            }
+
+            await Execution.delayUntil(
+                () => !!Inventory.first(item) || Equipment.contains(item),
+                4000
+            );
+            if (!Inventory.first(item) && !Equipment.contains(item)) {
+                this.log(`gear: ${item} still missing after withdraw — keep bank open and retry`);
+                return false;
+            }
+            this.log(`gear: withdrew ${item}`);
+            await Execution.delayTicks(1);
+        }
+
+        return this.hasGearAvailable();
+    }
+
+    /** Unequip then re-equip Bronze sword + Wooden shield from the pack. */
+    async equipGearFromPack() {
+        for (const item of GEAR) {
+            if (!Equipment.contains(item)) {
+                continue;
+            }
+            this.log(`unequipping ${item}`);
+            await Equipment.unequip(item);
+            await Execution.delayTicks(1);
+        }
+        for (const item of GEAR) {
+            if (Equipment.contains(item)) {
+                continue;
+            }
+            if (!Inventory.first(item)) {
+                continue;
+            }
+            this.status = `gear: equip ${item}`;
+            this.log(`re-equipping ${item}`);
+            if (await Equipment.equip(item)) {
+                this.log(`gear: equipped ${item}`);
+            } else {
+                this.log(`WARNING: could not equip ${item}`);
+            }
+            await Execution.delayTicks(1);
+        }
+        return this.hasGearEquipped();
+    }
+
+    /**
+     * Fresh combat-3 / total-28: (1) walk to 3092,3244,0 first, (2) bank junk except GEAR,
+     * (3) withdraw GEAR if stuck in bank, (4) equip and go.
      * @returns {Promise<boolean>} true if this loop spent time on travel/gear
      */
     async prepFreshDraynorBank() {
@@ -1376,26 +1455,15 @@ class LumbridgeGoblinKiller extends LoopingBot {
             await Execution.delayTicks(1);
         }
 
+        // Already holding gear and no junk — just equip and fight (no bank thrash).
         const shouldDeposit = depositExceptGear();
         const junk = Inventory.items().filter(i => shouldDeposit(i.name ?? ''));
-
         if (junk.length === 0 && this.hasGearAvailable()) {
-            for (const item of GEAR) {
-                if (Equipment.contains(item) || !Inventory.first(item)) {
-                    continue;
-                }
-                this.status = `gear: equip ${item}`;
-                if (await Equipment.equip(item)) {
-                    this.log(`gear: equipped ${item}`);
-                }
-                await Execution.delayTicks(1);
-            }
-            if (this.hasGearEquipped()) {
-                this.gearReady = true;
-                this.status = 'ready';
-                this.log('gear ready at Draynor (pack already clean) — heading to goblins');
-                return false;
-            }
+            await this.equipGearFromPack();
+            this.gearReady = true;
+            this.status = 'walking to goblins';
+            this.log('gear ready — heading to goblins (no bank needed)');
+            return false;
         }
 
         if (!(await this.openDraynorBoothHere())) {
@@ -1405,7 +1473,10 @@ class LumbridgeGoblinKiller extends LoopingBot {
         }
 
         if (typeof Bank.loaded === 'function') {
-            await Execution.delayUntil(() => Bank.loaded() || Bank.items().length > 0, 3000);
+            await Execution.delayUntil(
+                () => Bank.loaded() || (typeof Bank.items === 'function' && Bank.items().length > 0),
+                5000
+            );
         }
         await Execution.delayTicks(1);
 
@@ -1420,37 +1491,30 @@ class LumbridgeGoblinKiller extends LoopingBot {
             return true;
         }
 
-        this.log('depositing junk at Draynor (keeping Bronze sword + Wooden shield)');
-        await Bank.depositAllMatching(shouldDeposit);
-        await Execution.delayTicks(1);
-
-        await Bank.close();
-        await Execution.delayTicks(1);
-
-        for (const item of GEAR) {
-            if (Equipment.contains(item)) {
-                continue;
-            }
-            if (!Inventory.first(item)) {
-                continue;
-            }
-            this.status = `gear: equip ${item}`;
-            if (await Equipment.equip(item)) {
-                this.log(`gear: equipped ${item}`);
-            } else {
-                this.log(`WARNING: could not equip ${item}`);
-            }
+        if (junk.length > 0) {
+            this.log('depositing junk at Draynor (keeping Bronze sword + Wooden shield)');
+            await Bank.depositAllMatching(shouldDeposit);
             await Execution.delayTicks(1);
         }
 
-        if (this.hasGearEquipped()) {
-            this.gearReady = true;
-            this.status = 'ready';
-            this.log('gear ready (Draynor) — Bronze sword + Wooden shield; heading to goblins');
-        } else {
-            this.log('WARNING: missing Bronze sword / Wooden shield after Draynor — retrying');
-            await Execution.delayTicks(8);
+        // Gear may already be sitting in the bank from an earlier deposit — pull it out.
+        await this.withdrawMissingGearFromOpenBank();
+        if (Bank.isOpen()) {
+            await Bank.close();
+            await Execution.delayTicks(1);
         }
+
+        await this.equipGearFromPack();
+
+        if (this.hasGearAvailable()) {
+            this.gearReady = true;
+            this.status = 'walking to goblins';
+            this.log('gear ready (Draynor) — sword + shield; killing goblins until death');
+            return false;
+        }
+
+        this.log('WARNING: missing Bronze sword / Wooden shield after Draynor — retrying');
+        await Execution.delayTicks(5);
         return true;
     }
 
@@ -1485,7 +1549,10 @@ class LumbridgeGoblinKiller extends LoopingBot {
         }
 
         if (typeof Bank.loaded === 'function') {
-            await Execution.delayUntil(() => Bank.loaded() || Bank.items().length > 0, 3000);
+            await Execution.delayUntil(
+                () => Bank.loaded() || (typeof Bank.items === 'function' && Bank.items().length > 0),
+                5000
+            );
         }
         await Execution.delayTicks(1);
 
@@ -1503,56 +1570,30 @@ class LumbridgeGoblinKiller extends LoopingBot {
         } else {
             await Bank.depositAllMatching(() => true);
         }
-        await Execution.delayTicks(1);
+        await Execution.delayTicks(2);
 
-        for (const item of GEAR) {
-            if (Inventory.first(item)) {
-                continue;
-            }
-            const inBank = Bank.count(item) || 0;
-            if (inBank <= 0) {
-                this.log(`WARNING: no ${item} in bank — put one in, then continue`);
-                continue;
-            }
-            this.log(`gear: withdrawing ${item}`);
-            if (!(await Bank.withdrawX(item, 1))) {
-                this.log(`gear: withdraw failed for ${item}`);
-                await Execution.delayTicks(2);
-                return true;
-            }
+        await this.withdrawMissingGearFromOpenBank();
+        if (Bank.isOpen()) {
+            await Bank.close();
             await Execution.delayTicks(1);
         }
 
-        await Bank.close();
-        await Execution.delayTicks(1);
+        await this.equipGearFromPack();
 
-        for (const item of GEAR) {
-            if (Equipment.contains(item) || !Inventory.first(item)) {
-                continue;
-            }
-            this.status = `gear: equip ${item}`;
-            if (await Equipment.equip(item)) {
-                this.log(`gear: equipped ${item}`);
-            } else {
-                this.log(`WARNING: could not equip ${item}`);
-            }
-            await Execution.delayTicks(1);
-        }
-
-        if (this.hasGearEquipped()) {
+        if (this.hasGearAvailable()) {
             this.gearReady = true;
-            this.status = 'ready';
-            this.log('gear ready — Bronze sword + Wooden shield; heading to goblins');
-        } else {
-            this.log('gear incomplete — need Bronze sword and Wooden shield in the bank');
-            await Execution.delayTicks(8);
+            this.status = 'walking to goblins';
+            this.log('gear ready — sword + shield; killing goblins until death');
+            return false;
         }
+
+        this.log('gear incomplete — need Bronze sword and Wooden shield in the bank');
+        await Execution.delayTicks(5);
         return true;
     }
 
     /**
-     * Startup gear: always walk to 3092,3244,0 first — never nearest-bank / Al Kharid.
-     * Fresh accounts keep sword+shield; others deposit all then withdraw GEAR.
+     * Startup: one Draynor trip. After gearReady, never banks again until death loses gear.
      * @returns {Promise<boolean>} true if this loop spent time on gear
      */
     async prepCombatGear() {
@@ -1569,52 +1610,17 @@ class LumbridgeGoblinKiller extends LoopingBot {
             }
         }
 
-        if (this.freshStarter) {
-            return await this.prepFreshDraynorBank();
+        // Already geared — skip bank entirely and go kill.
+        if (this.hasGearAvailable()) {
+            await this.equipGearFromPack();
+            this.gearReady = true;
+            this.status = 'walking to goblins';
+            this.log('already have sword + shield — skipping bank, killing goblins');
+            return false;
         }
 
-        if (this.canSkipBankPrep()) {
-            while (Inventory.first('Bones')) {
-                const bones = Inventory.first('Bones');
-                if (!bones) {
-                    break;
-                }
-                this.status = 'burying bones';
-                const before = Inventory.used();
-                await bones.interact('Bury');
-                if (await Execution.delayUntil(() => Inventory.used() < before, 3000)) {
-                    this.buried++;
-                    this.log(`buried bones (#${this.buried})`);
-                } else {
-                    await Execution.delayTicks(1);
-                    return true;
-                }
-            }
-
-            for (const item of GEAR) {
-                if (Equipment.contains(item)) {
-                    continue;
-                }
-                if (!Inventory.first(item)) {
-                    continue;
-                }
-                this.status = `gear: equip ${item}`;
-                if (await Equipment.equip(item)) {
-                    this.log(`gear: equipped ${item}`);
-                } else {
-                    this.log(`WARNING: could not equip ${item}`);
-                    await Execution.delayTicks(1);
-                    return true;
-                }
-                await Execution.delayTicks(1);
-            }
-
-            if (this.hasGearEquipped()) {
-                this.gearReady = true;
-                this.status = 'ready';
-                this.log('gear ready (skip bank) — Bronze sword + Wooden shield; heading to goblins');
-                return false;
-            }
+        if (this.freshStarter) {
+            return await this.prepFreshDraynorBank();
         }
 
         return await this.prepGearAtDraynorBank();
@@ -1628,15 +1634,16 @@ class LumbridgeGoblinKiller extends LoopingBot {
                 continue;
             }
             if (!Inventory.first(item)) {
-                this.gearReady = false;
-                this.log(`missing ${item} — will bank + withdraw again`);
-                return true;
+                // Never clear gearReady mid-fight — that caused bank↔goblin thrashing.
+                this.log(`WARNING: ${item} missing mid-fight — bank only after death if lost`);
+                continue;
             }
             this.status = `equipping ${item}`;
             if (await Equipment.equip(item)) {
                 this.log(`equipped ${item}`);
                 did = true;
             }
+            await Execution.delayTicks(1);
         }
         return did;
     }
@@ -1644,11 +1651,11 @@ class LumbridgeGoblinKiller extends LoopingBot {
 
 export default defineBot({
     name: SCRIPT_NAME,
-    version: '1.9.1',
+    version: '1.10.0',
     category: 'Combat',
     tags: ['goblin', 'lumbridge', 'melee', 'death-recovery', 'xp', 'prayer', 'bank', 'draynor'],
     description:
-        "Benzyme's Goblin Killer — Draynor gear bank first; drops Beer/Kebab/Casket; goblin camp leash; stats tab open; no cow-field bone chasing",
+        "Benzyme's Goblin Killer — one Draynor gear trip, then goblins until death; drops Beer/Kebab/Casket",
     settingsSchema: {
         buryBones: {
             type: 'boolean',
