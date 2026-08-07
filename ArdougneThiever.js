@@ -161,6 +161,30 @@ function fmtXph(n) {
     return String(Math.round(n));
 }
 
+function fmtGp(n) {
+    const v = Math.max(0, Math.round(n));
+    if (v >= 1_000_000) {
+        return `${(v / 1_000_000).toFixed(2)}m`;
+    }
+    if (v >= 100_000) {
+        return `${(v / 1000).toFixed(0)}k`;
+    }
+    if (v >= 10_000) {
+        return `${(v / 1000).toFixed(1)}k`;
+    }
+    return String(v);
+}
+
+function invCoins() {
+    return Inventory.items()
+        .filter(i => (i.name ?? '').toLowerCase() === 'coins')
+        .reduce((n, i) => n + Math.max(0, i.count), 0);
+}
+
+function bankCoins() {
+    return Bank.count('Coins') || 0;
+}
+
 function fmtElapsed(ms) {
     const totalSec = Math.max(0, Math.floor(ms / 1000));
     const h = Math.floor(totalSec / 3600);
@@ -277,6 +301,10 @@ class ArdougneThiever extends LoopingBot {
     steals = 0;
     fails = 0;
     eats = 0;
+    /** Coins gained from successful pickpockets this session. */
+    gpStolen = 0;
+    /** Last known Coins stack in the bank (updated whenever bank is open). */
+    bankGp = 0;
     startedAt = 0;
     xpAtStart = 0;
     stunnedUntilTick = 0;
@@ -298,6 +326,8 @@ class ArdougneThiever extends LoopingBot {
         this.steals = 0;
         this.fails = 0;
         this.eats = 0;
+        this.gpStolen = 0;
+        this.bankGp = 0;
         this.bankTrips = 0;
         this.startReady = false;
         this.stunnedUntilTick = 0;
@@ -346,6 +376,7 @@ class ArdougneThiever extends LoopingBot {
         this.stopPausedPrefUnlock();
         this.log(
             `stopped — ${this.steals} steals, ${this.fails} fails, ${this.eats} eats, ` +
+                `GP stolen ${fmtGp(this.gpStolen)}, bank ${fmtGp(this.bankGp)}gp, ` +
                 `${this.bankTrips} bank trips (${this.status})`
         );
     }
@@ -457,6 +488,14 @@ class ArdougneThiever extends LoopingBot {
 
     needFoodBank() {
         return this.foodEnabled() && this.foodCount() === 0;
+    }
+
+    /** Snapshot bank Coins while the bank interface is open. */
+    refreshBankGp() {
+        if (!Bank.isOpen()) {
+            return;
+        }
+        this.bankGp = bankCoins();
     }
 
     isKeepOnDeposit(name) {
@@ -612,6 +651,7 @@ class ArdougneThiever extends LoopingBot {
             await Bank.depositAllMatching(() => true);
         }
         await Execution.delayTicks(1);
+        this.refreshBankGp();
 
         const want = this.withdrawFoodName();
         if (want && this.foodWithdraw > 0) {
@@ -632,6 +672,7 @@ class ArdougneThiever extends LoopingBot {
             await Execution.delayTicks(1);
         }
 
+        this.refreshBankGp();
         await Bank.close();
         this.bankTrips++;
         this.startReady = true;
@@ -640,7 +681,8 @@ class ArdougneThiever extends LoopingBot {
         this.status = `walking to ${cfg.name}`;
         this.log(
             `start done — walking to ${cfg.anchor.x},${cfg.anchor.z}` +
-                (cfg.npcId != null ? ` for ${cfg.name} (id ${cfg.npcId})` : ` for ${cfg.name}`)
+                (cfg.npcId != null ? ` for ${cfg.name} (id ${cfg.npcId})` : ` for ${cfg.name}`) +
+                ` (bank ${fmtGp(this.bankGp)}gp)`
         );
         await Traversal.walkResilient(cfg.anchor, {
             radius: 3,
@@ -650,6 +692,7 @@ class ArdougneThiever extends LoopingBot {
 
     async pickpocket(npc) {
         const beforeXp = Skills.xp('thieving');
+        const coinsBefore = invCoins();
         const t = npc.tile();
         this.status = `pickpocket ${npc.name ?? 'NPC'} (${npc.distance()}t)`;
         this.log(`Pickpocket ${npc.name} @ ${t.x},${t.z}`);
@@ -671,6 +714,10 @@ class ArdougneThiever extends LoopingBot {
 
         if (Skills.xp('thieving') > beforeXp) {
             this.steals++;
+            const gained = invCoins() - coinsBefore;
+            if (gained > 0) {
+                this.gpStolen += gained;
+            }
             return;
         }
 
@@ -729,6 +776,7 @@ class ArdougneThiever extends LoopingBot {
 
         await Bank.depositAllMatching(name => !this.isKeepOnDeposit(name));
         await Execution.delayTicks(1);
+        this.refreshBankGp();
 
         const have = this.foodCount();
         const need = Math.max(0, this.foodWithdraw - have);
@@ -750,10 +798,14 @@ class ArdougneThiever extends LoopingBot {
             await Execution.delayTicks(1);
         }
 
+        this.refreshBankGp();
         await Bank.close();
         this.bankTrips++;
         this.status = `returning to ${cfg.name}`;
-        this.log(`restocked food (${this.foodCount()}) — returning to ${cfg.name}`);
+        this.log(
+            `restocked food (${this.foodCount()}) — returning to ${cfg.name}` +
+                ` (bank ${fmtGp(this.bankGp)}gp)`
+        );
         await Traversal.walkResilient(cfg.anchor, {
             radius: 4,
             log: m => this.log(`  ${m}`)
@@ -777,6 +829,9 @@ class ArdougneThiever extends LoopingBot {
     }
 
     onPaint(ctx) {
+        if (Bank.isOpen()) {
+            this.refreshBankGp();
+        }
         const elapsed = Date.now() - this.startedAt;
         const hrs = elapsed / 3_600_000;
         const xp = Skills.xp('thieving') - this.xpAtStart;
@@ -790,6 +845,7 @@ class ArdougneThiever extends LoopingBot {
             `Target ${cfg.name}  ·  Thieving ${Skills.level('thieving')}`,
             `HP ${hp}/${Skills.level('hitpoints')}  ·  eat ≤ ${this.eatAtHp}  ·  food ${this.foodCount()}/${this.foodWithdraw}`,
             `steals ${this.steals}  fails ${this.fails}  eats ${this.eats}  banks ${this.bankTrips}`,
+            `GP stolen ${fmtGp(this.gpStolen)}  ·  bank ${fmtGp(this.bankGp)}gp`,
             `XP ${fmtXph(xph)}/hr  (+${Math.round(xp)} xp)`
         ];
 
