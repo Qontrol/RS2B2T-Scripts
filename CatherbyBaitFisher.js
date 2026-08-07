@@ -1,17 +1,18 @@
 /**
- * CatherbyNetFisher — small-net shrimp at Catherby (Net+Bait spots only).
- * Optional cook on the bank-house Range on the way to the bank, then bank + return.
+ * CatherbyBaitFisher — bait-rod sardine/herring at Catherby (Net+Bait spots only).
+ * Withdraws Fishing rod + all Fishing bait from bank. Optional cook on bank-house Range,
+ * optional sell catch to Harry instead of banking, then return to shore.
  * Completely vibe coded by @.benzyme on Discord via Cursor AI
  * Self-contained ESM for rs2b0t Load local script / Load URL.
  */
 const SUPPORTED_API_VERSION = 1;
 const abi = globalThis.__rs2b0t;
 if (!abi) {
-    throw new Error('CatherbyNetFisher: globalThis.__rs2b0t missing — load inside rs2b0t bot.html');
+    throw new Error('CatherbyBaitFisher: globalThis.__rs2b0t missing — load inside rs2b0t bot.html');
 }
 if (abi.apiVersion !== SUPPORTED_API_VERSION) {
     throw new Error(
-        `CatherbyNetFisher: ABI ${abi.apiVersion} != supported ${SUPPORTED_API_VERSION}`
+        `CatherbyBaitFisher: ABI ${abi.apiVersion} != supported ${SUPPORTED_API_VERSION}`
     );
 }
 
@@ -26,13 +27,15 @@ const {
     Inventory,
     Bank,
     Banking,
+    Shop,
     Traversal,
     Tile,
     Skills,
-    ChatDialog
+    ChatDialog,
+    withdrawOp
 } = abi;
 
-const SCRIPT_NAME = 'CatherbyNetFisher';
+const SCRIPT_NAME = 'CatherbyBaitFisher';
 
 /** Post-login welcome modal interface id (Close Window top-right). */
 const WELCOME_SCREEN_ID = 5993;
@@ -125,13 +128,21 @@ const STAND_RADIUS = 8;
 /** Catherby bank. */
 const BANK_STAND = new Tile(2809, 3441, 0);
 
+/** Harry's Fishing Shop stand. */
+const HARRY_STAND = new Tile(2833, 3443, 0);
+const HARRY_NAME = 'Harry';
+
 /** Bank-house Range — between pier and bank. */
 const RANGE_STAND = new Tile(2817, 3443, 0);
 const RANGE_LOC = new Tile(2817, 3444, 0);
 const RANGE_LEASH = 8;
 
-const NET_NAME = 'Small fishing net';
+const ROD_NAME = 'Fishing rod';
+const BAIT_NAME = 'Fishing bait';
 const SPOT_NAME = 'Fishing spot';
+
+/** Raw names Harry buys that we catch (bait on Net+Bait). */
+const HARRY_BUY_RAW = new Set(['raw sardine', 'raw herring']);
 
 function fmtXph(n) {
     if (n >= 100_000) {
@@ -214,10 +225,9 @@ function unlockPausedPrefsUi() {
     }
 }
 
-const PAINT_FONT_ID = 'benzyme-catherby-font-v3';
+const PAINT_FONT_ID = 'benzyme-catherby-bait-font-v1';
 const PAINT_FONT = '13px Exo, "Bebas Neue", "Bitcount Ink", sans-serif';
 
-/** Load Exo (+ Bebas Neue / Bitcount Ink) from Google Fonts onto the bot page (once). */
 function ensurePaintFont() {
     if (typeof document === 'undefined') {
         return;
@@ -232,14 +242,15 @@ function ensurePaintFont() {
     document.head.appendChild(style);
 }
 
-function isKeepTool(name) {
+function isKeepGear(name) {
     if (!name) {
         return false;
     }
-    return (name ?? '').toLowerCase().includes('fishing net');
+    const n = name.toLowerCase();
+    return n === 'fishing rod' || n === 'fishing bait';
 }
 
-function isRawShrimpFish(name) {
+function isRawBaitFish(name) {
     if (!name) {
         return false;
     }
@@ -247,10 +258,10 @@ function isRawShrimpFish(name) {
     if (!n.startsWith('raw ')) {
         return false;
     }
-    return n.includes('shrimp') || n.includes('anchov');
+    return n.includes('sardine') || n.includes('herring');
 }
 
-function isCookedShrimpFish(name) {
+function isCookedBaitFish(name) {
     if (!name) {
         return false;
     }
@@ -258,7 +269,7 @@ function isCookedShrimpFish(name) {
     if (n.startsWith('raw ') || n.startsWith('burnt ')) {
         return false;
     }
-    return n === 'shrimps' || n === 'shrimp' || n === 'anchovies' || n === 'anchovy';
+    return n === 'sardine' || n === 'herring';
 }
 
 function isBurntFish(name) {
@@ -270,25 +281,32 @@ function isBurntFish(name) {
 }
 
 function isBankableFish(name) {
-    return isRawShrimpFish(name) || isCookedShrimpFish(name) || isBurntFish(name);
+    return isRawBaitFish(name) || isCookedBaitFish(name) || isBurntFish(name);
+}
+
+function isHarrySellable(name) {
+    if (!name) {
+        return false;
+    }
+    return HARRY_BUY_RAW.has(name.toLowerCase());
 }
 
 /**
  * Cooking level to cook each raw (not fishing level).
- * Anchovies: Fishing 15 to catch, Cooking 1 to cook. Shrimp: Fishing 1 / Cooking 1.
+ * Sardine: Cooking 1. Herring: Cooking 5. Fishing: sardine 5 / herring 10.
  */
 const COOK_LEVEL = {
-    shrimp: 1,
-    anchovy: 1
+    sardine: 1,
+    herring: 5
 };
 
 function fishKind(name) {
     const n = (name ?? '').toLowerCase();
-    if (n.includes('anchov')) {
-        return 'anchovy';
+    if (n.includes('herring')) {
+        return 'herring';
     }
-    if (n.includes('shrimp')) {
-        return 'shrimp';
+    if (n.includes('sardine')) {
+        return 'sardine';
     }
     return null;
 }
@@ -316,27 +334,34 @@ function countMatching(pred) {
 }
 
 function rawFishCount() {
-    return countMatching(isRawShrimpFish);
+    return countMatching(isRawBaitFish);
 }
 
-/** Raw shrimp/anchovies the player is high enough Cooking to cook. */
 function cookableCount() {
-    return countMatching(n => isRawShrimpFish(n) && canCookRaw(n));
+    return countMatching(n => isRawBaitFish(n) && canCookRaw(n));
 }
 
 function cookedFishCount() {
-    return countMatching(isCookedShrimpFish);
+    return countMatching(isCookedBaitFish);
 }
 
 function burntCount() {
     return countMatching(isBurntFish);
 }
 
+function harrySellCount() {
+    return countMatching(isHarrySellable);
+}
+
+function fishForDisposeCount() {
+    return rawFishCount() + cookedFishCount() + burntCount();
+}
+
 function lastCookableRaw() {
     const items = Inventory.items();
     for (let i = items.length - 1; i >= 0; i--) {
         const name = items[i].name;
-        if (isRawShrimpFish(name) && canCookRaw(name)) {
+        if (isRawBaitFish(name) && canCookRaw(name)) {
             return items[i];
         }
     }
@@ -346,11 +371,10 @@ function lastCookableRaw() {
 function countCookableNamed(fragment) {
     const want = fragment.toLowerCase();
     return countMatching(
-        n => isRawShrimpFish(n) && canCookRaw(n) && (n ?? '').toLowerCase().includes(want)
+        n => isRawBaitFish(n) && canCookRaw(n) && (n ?? '').toLowerCase().includes(want)
     );
 }
 
-/** Pick make-menu product for a raw we can cook (prefer the item just used on the range). */
 function matchCookProduct(products, preferName) {
     if (!products || products.length === 0) {
         return null;
@@ -361,12 +385,14 @@ function matchCookProduct(products, preferName) {
         if (hit) {
             return hit;
         }
-        const soft = products.find(p => (p ?? '').toLowerCase().includes(prefer.replace(/^raw\s+/, '')));
+        const soft = products.find(p =>
+            (p ?? '').toLowerCase().includes(prefer.replace(/^raw\s+/, ''))
+        );
         if (soft) {
             return soft;
         }
     }
-    for (const frag of ['anchov', 'shrimp']) {
+    for (const frag of ['herring', 'sardine']) {
         if (countCookableNamed(frag) <= 0) {
             continue;
         }
@@ -378,8 +404,20 @@ function matchCookProduct(products, preferName) {
     return products[0] ?? null;
 }
 
-function hasNet() {
-    return Inventory.items().some(i => isKeepTool(i.name));
+function hasRod() {
+    return Inventory.items().some(i => (i.name ?? '').toLowerCase() === 'fishing rod');
+}
+
+function baitCount() {
+    return countMatching(n => (n ?? '').toLowerCase() === 'fishing bait');
+}
+
+function hasBait() {
+    return baitCount() > 0;
+}
+
+function needsGear() {
+    return !hasRod() || !hasBait();
 }
 
 function netOp(actions) {
@@ -390,8 +428,8 @@ function baitOp(actions) {
     return actions.find(a => /^bait$/i.test(a)) ?? null;
 }
 
-/** Shrimp hops only — Net + Bait (never Net + Harpoon). */
-function isShrimpNetSpot(actions) {
+/** Sardine/herring hops — Net + Bait (never Net + Harpoon / Lure + Bait). */
+function isNetBaitSpot(actions) {
     return netOp(actions) !== null && baitOp(actions) !== null;
 }
 
@@ -407,15 +445,37 @@ function openDoorOp(loc) {
     return loc.actions().find(a => /^open/i.test(a)) ?? null;
 }
 
-function isNetGroundName(name) {
+function isRodGroundName(name) {
     if (!name) {
         return false;
     }
-    const n = name.toLowerCase();
-    return n.includes('fishing net') || n === 'small net';
+    return name.toLowerCase() === 'fishing rod';
 }
 
-class CatherbyNetFisher extends LoopingBot {
+function harrySellNamesHeld() {
+    const names = [];
+    const seen = new Set();
+    for (const item of Inventory.items()) {
+        const name = item.name;
+        if (!name || !isHarrySellable(name)) {
+            continue;
+        }
+        const key = name.toLowerCase();
+        if (seen.has(key)) {
+            continue;
+        }
+        seen.add(key);
+        names.push(name);
+    }
+    return names;
+}
+
+function countByExactName(name) {
+    const want = (name ?? '').toLowerCase();
+    return countMatching(n => (n ?? '').toLowerCase() === want);
+}
+
+class CatherbyBaitFisher extends LoopingBot {
     status = 'starting';
     startedAt = 0;
     fishXpAtStart = 0;
@@ -424,9 +484,14 @@ class CatherbyNetFisher extends LoopingBot {
     caught = 0;
     /** Total successfully cooked fish this session (not burnt). */
     cooked = 0;
+    /** Units sold to Harry this session. */
+    sold = 0;
     bankTrips = 0;
-    /** Preference: cook on Range before banking. */
+    sellTrips = 0;
+    /** Preference: cook on Range before banking / selling. */
     cookOnWay = true;
+    /** Preference: sell catch to Harry instead of banking. */
+    sellToHarry = false;
     cookingLoad = false;
     lastRawSeen = 0;
     /** @type {ReturnType<typeof setInterval> | null} */
@@ -444,7 +509,9 @@ class CatherbyNetFisher extends LoopingBot {
         this.cookXpAtStart = Skills.xp('cooking');
         this.caught = 0;
         this.cooked = 0;
+        this.sold = 0;
         this.bankTrips = 0;
+        this.sellTrips = 0;
         this.cookingLoad = false;
         this.lastRawSeen = rawFishCount();
 
@@ -455,11 +522,15 @@ class CatherbyNetFisher extends LoopingBot {
         });
 
         this.log(
-            `CatherbyNetFisher @ ${ANCHOR.x},${ANCHOR.z} — Net+Bait shrimp only; ` +
-                `cook on way to bank: ${this.cookOnWay ? 'on' : 'off'}`
+            `CatherbyBaitFisher @ ${ANCHOR.x},${ANCHOR.z} — Bait on Net+Bait only; ` +
+                `cook on way: ${this.cookOnWay ? 'on' : 'off'}; ` +
+                `sell to Harry: ${this.sellToHarry ? 'on' : 'off'}`
         );
-        if (!hasNet()) {
-            this.log('WARNING: no Small fishing net in inventory');
+        if (!hasRod()) {
+            this.log('WARNING: no Fishing rod — will withdraw from bank');
+        }
+        if (!hasBait()) {
+            this.log('WARNING: no Fishing bait — will withdraw all from bank');
         }
         this.status = 'ready';
     }
@@ -475,18 +546,27 @@ class CatherbyNetFisher extends LoopingBot {
             this.unlockTimer = null;
         }
         this.log(
-            `stopped — caught ${this.caught}, cooked ${this.cooked}, bank trips ${this.bankTrips} (${this.status})`
+            `stopped — caught ${this.caught}, cooked ${this.cooked}, sold ${this.sold}, ` +
+                `bank ${this.bankTrips}, sell trips ${this.sellTrips} (${this.status})`
         );
     }
 
     syncPrefs({ silent = false } = {}) {
-        const prev = this.cookOnWay;
+        const prevCook = this.cookOnWay;
+        const prevSell = this.sellToHarry;
         this.cookOnWay = readPrefBool(
             'cookOnWay',
             this.settings.bool('cookOnWay', true)
         );
-        if (!silent && prev !== this.cookOnWay) {
-            this.log(`prefs: cook on way to bank → ${this.cookOnWay ? 'on' : 'off'}`);
+        this.sellToHarry = readPrefBool(
+            'sellToHarry',
+            this.settings.bool('sellToHarry', false)
+        );
+        if (!silent && prevCook !== this.cookOnWay) {
+            this.log(`prefs: cook on way → ${this.cookOnWay ? 'on' : 'off'}`);
+        }
+        if (!silent && prevSell !== this.sellToHarry) {
+            this.log(`prefs: sell to Harry → ${this.sellToHarry ? 'on' : 'off'}`);
         }
     }
 
@@ -498,7 +578,6 @@ class CatherbyNetFisher extends LoopingBot {
         this.lastRawSeen = now;
     }
 
-    /** Credit newly appearing cooked fish only. */
     noteCooked(beforeCooked) {
         const now = cookedFishCount();
         if (now > beforeCooked) {
@@ -529,6 +608,11 @@ class CatherbyNetFisher extends LoopingBot {
             return;
         }
 
+        if (Shop.isOpen()) {
+            await this.sellOpenHarry();
+            return;
+        }
+
         if (Bank.isOpen()) {
             await Bank.close();
             return;
@@ -536,24 +620,24 @@ class CatherbyNetFisher extends LoopingBot {
 
         if (ChatDialog.isMakeMenu()) {
             await this.chooseCookProduct();
-            if (cookableCount() === 0 && (cookedFishCount() > 0 || burntCount() > 0 || rawFishCount() > 0)) {
+            if (cookableCount() === 0 && fishForDisposeCount() > 0) {
                 if (burntCount() > 0) {
                     await this.dropBurnt();
                 }
                 this.cookingLoad = false;
-                await this.bankAndReturn();
+                await this.disposeCatchAndReturn();
             }
             return;
         }
 
-        if (!hasNet()) {
-            this.status = 'need net';
-            if (await this.lootNetFromGround()) {
-                this.log('looted Small fishing net');
+        if (needsGear()) {
+            if (!hasRod() && (await this.lootRodFromGround())) {
+                this.log('looted Fishing rod');
                 return;
             }
-            this.log('no Small fishing net — withdraw one, then continue');
-            await Execution.delayTicks(8);
+            this.status = 'need gear';
+            this.log('missing rod/bait — banking for Fishing rod + all Fishing bait');
+            await this.bankRestockAndReturn();
             return;
         }
 
@@ -567,8 +651,8 @@ class CatherbyNetFisher extends LoopingBot {
                 await this.dropBurnt();
             }
             this.cookingLoad = false;
-            if (cookedFishCount() > 0 || burntCount() > 0 || rawFishCount() > 0) {
-                await this.bankAndReturn();
+            if (fishForDisposeCount() > 0) {
+                await this.disposeCatchAndReturn();
             }
             return;
         }
@@ -577,13 +661,13 @@ class CatherbyNetFisher extends LoopingBot {
             if (this.cookOnWay && cookableCount() > 0) {
                 this.cookingLoad = true;
                 this.log(
-                    `full inv (${cookableCount()} cookable / ${rawFishCount()} raw) — cooking on way to bank`
+                    `full inv (${cookableCount()} cookable / ${rawFishCount()} raw) — cooking on way`
                 );
                 await this.cookLoad();
                 return;
             }
-            if (rawFishCount() > 0 || cookedFishCount() > 0) {
-                await this.bankAndReturn();
+            if (fishForDisposeCount() > 0) {
+                await this.disposeCatchAndReturn();
                 return;
             }
         }
@@ -609,7 +693,7 @@ class CatherbyNetFisher extends LoopingBot {
             return;
         }
 
-        const spot = this.findShrimpSpot();
+        const spot = this.findBaitSpot();
         if (!spot) {
             this.status = 'waiting for Net+Bait spot';
             if (Tile.from(here).distanceTo(ANCHOR) > STAND_RADIUS) {
@@ -619,49 +703,60 @@ class CatherbyNetFisher extends LoopingBot {
             return;
         }
 
-        await this.netSpot(spot);
+        await this.baitSpot(spot);
     }
 
-    findShrimpSpot() {
+    /** After cook (or raw full): sell to Harry or bank, then return to shore. */
+    async disposeCatchAndReturn() {
+        if (this.sellToHarry && (harrySellCount() > 0 || cookedFishCount() > 0)) {
+            await this.sellToHarryAndReturn();
+            return;
+        }
+        await this.bankRestockAndReturn();
+    }
+
+    findBaitSpot() {
         return Npcs.query()
             .name(SPOT_NAME)
-            .where(n => isShrimpNetSpot(n.actions()))
+            .where(n => isNetBaitSpot(n.actions()))
             .where(n => Tile.from(n.tile()).distanceTo(ANCHOR) <= LEASH)
             .nearest();
     }
 
-    async netSpot(spot) {
-        const op = netOp(spot.actions());
+    async baitSpot(spot) {
+        const op = baitOp(spot.actions());
         if (!op) {
             await Execution.delayTicks(2);
             return;
         }
 
         const before = rawFishCount();
+        const beforeBait = baitCount();
         const st = spot.tile();
-        this.status = `netting (${spot.distance()}t)`;
-        this.log(`Net shrimp spot @ ${st.x},${st.z}`);
+        this.status = `baiting (${spot.distance()}t)`;
+        this.log(`Bait sardine/herring spot @ ${st.x},${st.z}`);
         await spot.interact(op);
 
         await Execution.delayUntil(
             () =>
                 rawFishCount() > before ||
+                baitCount() < beforeBait ||
                 Game.animating() ||
                 ChatDialog.canContinue() ||
-                !this.findShrimpSpot(),
+                !this.findBaitSpot(),
             8000
         );
         this.noteCatches();
     }
 
-    async lootNetFromGround() {
-        if (hasNet()) {
+    async lootRodFromGround() {
+        if (hasRod()) {
             return true;
         }
         const ground =
-            GroundItems.query().name(NET_NAME).within(12).nearest() ??
+            GroundItems.query().name(ROD_NAME).within(12).nearest() ??
             GroundItems.query()
-                .where(g => isNetGroundName(g.name))
+                .where(g => isRodGroundName(g.name))
                 .within(12)
                 .nearest();
         if (!ground) {
@@ -670,8 +765,8 @@ class CatherbyNetFisher extends LoopingBot {
         const before = Inventory.used();
         await ground.interact('Take');
         return (
-            (await Execution.delayUntil(() => hasNet() || Inventory.used() > before, 6000)) &&
-            hasNet()
+            (await Execution.delayUntil(() => hasRod() || Inventory.used() > before, 6000)) &&
+            hasRod()
         );
     }
 
@@ -705,7 +800,7 @@ class CatherbyNetFisher extends LoopingBot {
 
     async walkToRange() {
         this.status = 'walking to range';
-        this.log(`walking to Range ${RANGE_STAND.x},${RANGE_STAND.z} (on way to bank)`);
+        this.log(`walking to Range ${RANGE_STAND.x},${RANGE_STAND.z} (on way to bank/Harry)`);
         await Traversal.walkResilient(RANGE_STAND, {
             radius: 1,
             log: m => this.log(`  ${m}`)
@@ -726,7 +821,7 @@ class CatherbyNetFisher extends LoopingBot {
         const raw = lastCookableRaw();
         const hint = matchCookProduct(products, raw?.name);
         const kind = fishKind(hint) || fishKind(raw?.name);
-        const frag = kind === 'anchovy' ? 'anchov' : kind === 'shrimp' ? 'shrimp' : null;
+        const frag = kind === 'herring' ? 'herring' : kind === 'sardine' ? 'sardine' : null;
         const batch = frag
             ? Math.max(1, Math.min(countCookableNamed(frag), 28))
             : Math.max(1, Math.min(cookableCount(), 28));
@@ -793,9 +888,9 @@ class CatherbyNetFisher extends LoopingBot {
             oven = this.findRange();
         }
         if (!oven) {
-            this.log('WARNING: no Range near bank house — banking raw instead');
+            this.log('WARNING: no Range near bank house — disposing raw instead');
             this.cookingLoad = false;
-            await this.bankAndReturn();
+            await this.disposeCatchAndReturn();
             return;
         }
 
@@ -806,7 +901,7 @@ class CatherbyNetFisher extends LoopingBot {
                     await this.dropBurnt();
                 }
                 this.cookingLoad = false;
-                await this.bankAndReturn();
+                await this.disposeCatchAndReturn();
             }
             return;
         }
@@ -848,7 +943,7 @@ class CatherbyNetFisher extends LoopingBot {
                     await this.dropBurnt();
                 }
                 this.cookingLoad = false;
-                await this.bankAndReturn();
+                await this.disposeCatchAndReturn();
             }
             return;
         }
@@ -861,7 +956,6 @@ class CatherbyNetFisher extends LoopingBot {
 
         let mark = cookableCount();
         let idle = 0;
-        // Finish current batch; if another cookable type remains (e.g. anchovies after shrimp), loop continues.
         for (let guard = 0; guard < 400 && cookableCount() > 0; guard++) {
             if (ChatDialog.canContinue() || ChatDialog.isMakeMenu()) {
                 this.noteCooked(cookedMark);
@@ -889,7 +983,7 @@ class CatherbyNetFisher extends LoopingBot {
                 await this.dropBurnt();
             }
             this.cookingLoad = false;
-            await this.bankAndReturn();
+            await this.disposeCatchAndReturn();
         }
     }
 
@@ -907,7 +1001,91 @@ class CatherbyNetFisher extends LoopingBot {
         }
     }
 
-    async bankAndReturn() {
+    async sellToHarryAndReturn() {
+        const rawSell = harrySellCount();
+        const cooked = cookedFishCount();
+        this.status = 'walking to Harry';
+        this.log(
+            `selling to Harry` +
+                (rawSell ? ` ${rawSell} raw` : '') +
+                (cooked ? ` (${cooked} cooked → bank after)` : '')
+        );
+
+        this.lastRawSeen = 0;
+
+        await Traversal.walkResilient(HARRY_STAND, {
+            radius: 2,
+            log: m => this.log(`  ${m}`)
+        });
+        await this.openNearbyDoor();
+
+        this.status = 'opening Harry';
+        if (!(await Shop.open(HARRY_NAME))) {
+            this.log('could not open Harry — retrying next loop');
+            await Execution.delayTicks(3);
+            return;
+        }
+
+        await this.sellOpenHarry();
+    }
+
+    async sellOpenHarry() {
+        this.status = 'selling to Harry';
+        let sold = 0;
+        for (let guard = 0; guard < 60 && harrySellCount() > 0 && Shop.isOpen(); guard++) {
+            const names = harrySellNamesHeld();
+            if (names.length === 0) {
+                break;
+            }
+            for (const name of names) {
+                const have = countByExactName(name);
+                if (have <= 0) {
+                    continue;
+                }
+                const n = await Shop.sell(name, have);
+                if (n > 0) {
+                    sold += n;
+                    this.log(`sold ${n}× ${name} to Harry`);
+                }
+                await Execution.delayTicks(1);
+            }
+            if (harrySellCount() > 0) {
+                await Execution.delayTicks(1);
+            }
+        }
+
+        if (Shop.isOpen()) {
+            await Shop.close();
+        }
+
+        this.sold += sold;
+        this.sellTrips++;
+        this.cookingLoad = false;
+
+        if (harrySellCount() > 0) {
+            this.log(`WARNING: still holding ${harrySellCount()} sellable raw — will retry`);
+            await Execution.delayTicks(3);
+            return;
+        }
+
+        // Cooked leftovers Harry won't buy — bank them + restock bait/rod.
+        if (cookedFishCount() > 0 || burntCount() > 0 || needsGear()) {
+            await this.bankRestockAndReturn();
+            return;
+        }
+
+        this.lastRawSeen = rawFishCount();
+        this.status = 'returning to shore';
+        await Traversal.walkResilient(ANCHOR, {
+            radius: 3,
+            log: m => this.log(`  ${m}`)
+        });
+    }
+
+    /**
+     * Bank fish, withdraw Fishing rod (if needed) + Withdraw-All Fishing bait, return to shore.
+     */
+    async bankRestockAndReturn() {
         const raw = rawFishCount();
         const cooked = cookedFishCount();
         this.status = 'banking';
@@ -915,20 +1093,21 @@ class CatherbyNetFisher extends LoopingBot {
             `banking` +
                 (raw ? ` ${raw} raw` : '') +
                 (cooked ? ` ${cooked} cooked` : '') +
-                (burntCount() ? ` ${burntCount()} burnt` : '')
+                (burntCount() ? ` ${burntCount()} burnt` : '') +
+                ` — restock rod + all bait`
         );
 
-        // After banking raw, lastRawSeen must not credit re-withdraws as new catches.
         this.lastRawSeen = 0;
 
         await Banking.bankNearest({
             destination: { name: 'Catherby', tile: BANK_STAND },
             deposit: name => {
-                if (isKeepTool(name)) {
+                if (isKeepGear(name)) {
                     return false;
                 }
                 return isBankableFish(name);
             },
+            afterDeposit: async () => await this.withdrawGearFromOpenBank(),
             returnTo: ANCHOR,
             log: m => this.log(`  ${m}`)
         });
@@ -937,6 +1116,58 @@ class CatherbyNetFisher extends LoopingBot {
         this.cookingLoad = false;
         this.lastRawSeen = rawFishCount();
         this.status = 'returning to shore';
+
+        if (!hasRod()) {
+            this.log('WARNING: still no Fishing rod after bank');
+        }
+        if (!hasBait()) {
+            this.log('WARNING: still no Fishing bait after bank — stock the bank');
+        } else {
+            this.log(`gear ready — rod + ${baitCount()} bait`);
+        }
+    }
+
+    async withdrawGearFromOpenBank() {
+        if (!Bank.isOpen()) {
+            return;
+        }
+        await Execution.delayUntil(() => Bank.loaded() || !Bank.isOpen(), 3000);
+        if (!Bank.isOpen()) {
+            return;
+        }
+
+        if (!hasRod()) {
+            const rodBank = Bank.items().find(
+                i => (i.name ?? '').toLowerCase() === 'fishing rod'
+            );
+            if (rodBank) {
+                const op =
+                    (typeof withdrawOp === 'function'
+                        ? withdrawOp(rodBank.ops, '1')
+                        : null) ?? 'Withdraw-1';
+                this.log('withdrawing Fishing rod');
+                await Bank.withdraw(ROD_NAME, op);
+                await Execution.delayTicks(1);
+            } else {
+                this.log('WARNING: no Fishing rod in bank');
+            }
+        }
+
+        const baitBank = Bank.items().find(
+            i => (i.name ?? '').toLowerCase() === 'fishing bait'
+        );
+        if (baitBank && (baitBank.count ?? 0) > 0) {
+            const allOp =
+                (typeof withdrawOp === 'function'
+                    ? withdrawOp(baitBank.ops, 'all')
+                    : null) ?? 'Withdraw-All';
+            const before = baitCount();
+            this.log(`withdrawing all Fishing bait (bank has ${baitBank.count})`);
+            await Bank.withdraw(BAIT_NAME, allOp);
+            await Execution.delayUntil(() => baitCount() > before || !Bank.isOpen(), 4000);
+        } else if (!hasBait()) {
+            this.log('WARNING: no Fishing bait in bank');
+        }
     }
 
     onPaint(ctx) {
@@ -949,12 +1180,26 @@ class CatherbyNetFisher extends LoopingBot {
         const cookXph = hrs > 0.008 ? cookXp / hrs : 0;
         const caughtPh = hrs > 0.008 ? this.caught / hrs : 0;
         const cookedPh = hrs > 0.008 ? this.cooked / hrs : 0;
+        const soldPh = hrs > 0.008 ? this.sold / hrs : 0;
+
+        const mode = this.sellToHarry
+            ? this.cookOnWay
+                ? 'cook→Harry'
+                : 'sell→Harry'
+            : this.cookOnWay
+              ? 'cook→bank'
+              : 'bank raw';
 
         const lines = [
-            `Benzyme's Catherby Fisher  Fish ${Skills.level('fishing')}  Cook ${Skills.level('cooking')}`,
-            `time ${fmtElapsed(elapsed)}  ·  ${this.cookOnWay ? 'cook→bank' : 'bank raw'}  ·  ${this.status}`,
-            `caught ${this.caught} (${fmtXph(caughtPh)}/hr)  cooked ${this.cooked} (${fmtXph(cookedPh)}/hr)`,
-            `trips ${this.bankTrips}  raw ${rawFishCount()}  Fish XP ${fmtXph(fishXph)}/hr` +
+            `Benzyme's Catherby Bait  Fish ${Skills.level('fishing')}  Cook ${Skills.level('cooking')}`,
+            `time ${fmtElapsed(elapsed)}  ·  ${mode}  ·  ${this.status}`,
+            `caught ${this.caught} (${fmtXph(caughtPh)}/hr)  cooked ${this.cooked} (${fmtXph(cookedPh)}/hr)` +
+                (this.sellToHarry || this.sold > 0
+                    ? `  sold ${this.sold} (${fmtXph(soldPh)}/hr)`
+                    : ''),
+            `bait ${baitCount()}  bank ${this.bankTrips}` +
+                (this.sellToHarry || this.sellTrips > 0 ? `  sells ${this.sellTrips}` : '') +
+                `  Fish XP ${fmtXph(fishXph)}/hr` +
                 (this.cookOnWay || cookXp > 0 ? `  Cook XP ${fmtXph(cookXph)}/hr` : '')
         ];
 
@@ -967,7 +1212,7 @@ class CatherbyNetFisher extends LoopingBot {
         const lineH = 18;
         ctx.fillStyle = 'rgba(0,0,0,0.55)';
         ctx.fillRect(6, 6, maxW + pad * 2, pad * 2 + lines.length * lineH);
-        ctx.fillStyle = '#7eb8da';
+        ctx.fillStyle = '#9bc47a';
         lines.forEach((line, i) => {
             ctx.fillText(line, 6 + pad, 6 + pad + (i + 1) * lineH - 4);
         });
@@ -976,11 +1221,11 @@ class CatherbyNetFisher extends LoopingBot {
 
 export default defineBot({
     name: SCRIPT_NAME,
-    version: '2.0.0',
+    version: '1.0.0',
     category: 'Fishing',
-    tags: ['fishing', 'catherby', 'net', 'shrimp', 'bank', 'cook'],
+    tags: ['fishing', 'catherby', 'bait', 'sardine', 'herring', 'bank', 'cook', 'harry'],
     description:
-        "Benzyme's Catherby Fisher — small-net shrimp at Net+Bait spots only. Optional cook on bank-house Range on the way to bank. Shows total caught/cooked and per-hour rates.",
+        "Benzyme's Catherby Bait Fisher — bait sardine/herring on Net+Bait spots only. Withdraws rod + all bait from bank. Optional cook on way; optional sell to Harry instead of banking.",
     settingsSchema: {
         cookOnWay: {
             type: 'boolean',
@@ -988,8 +1233,16 @@ export default defineBot({
             label: 'Cook on way to bank',
             group: 'Cooking',
             help:
-                'When the pack is full, cook Raw shrimps/anchovies on the Catherby bank-house Range, drop burnt, then bank and return to the shore'
+                'When the pack is full, cook Raw sardine/herring on the Catherby bank-house Range, drop burnt, then bank or sell to Harry'
+        },
+        sellToHarry: {
+            type: 'boolean',
+            default: false,
+            label: 'Sell to Harry',
+            group: 'Sell',
+            help:
+                'Sell Raw sardine/herring to Harry at the Catherby fishing shop instead of banking, then return to bait fishing. Cooked leftovers (if cook-on-way is on) still bank. Restocks rod + all bait from bank when needed.'
         }
     },
-    create: () => new CatherbyNetFisher()
+    create: () => new CatherbyBaitFisher()
 });

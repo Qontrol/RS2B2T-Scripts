@@ -36,54 +36,84 @@ const SCRIPT_NAME = 'ArdougneThiever';
 /** Post-login welcome modal interface id (Close Window top-right). */
 const WELCOME_SCREEN_ID = 5993;
 
-/**
- * Dismiss "Welcome to RuneScape" / message-centre modal via Close Window.
- * Uses host reader/actions when available (rs2b0t load-local).
- * @returns {Promise<boolean>} true if we closed it
- */
-async function dismissWelcomeScreen() {
-    const host = globalThis.rs2b0t;
-    if (!host?.reader || !host?.actions) {
+function welcomeHost() {
+    return globalThis.rs2b0t ?? null;
+}
+
+function isWelcomeModalOpen() {
+    const host = welcomeHost();
+    if (!host?.reader) {
         return false;
     }
-    const { reader, actions } = host;
+    const { reader } = host;
     const main = typeof reader.modals === 'function' ? reader.modals().main : -1;
     if (main === -1) {
         return false;
     }
-    let isWelcome = main === WELCOME_SCREEN_ID;
-    if (!isWelcome && typeof reader.mainModalTexts === 'function') {
-        const texts = reader.mainModalTexts();
-        isWelcome = texts.some(
-            t =>
-                /welcome to runescape/i.test(t) ||
-                /unread messages/i.test(t) ||
-                /jagex staff will never email/i.test(t)
-        );
+    if (main === WELCOME_SCREEN_ID) {
+        return true;
     }
-    if (!isWelcome) {
+    if (typeof reader.mainModalTexts !== 'function') {
         return false;
     }
-    // Prefer real Close Window click (BUTTON_CLOSE → CLOSE_MODAL).
-    if (typeof actions.closeModal === 'function' && actions.closeModal()) {
-        await Execution.delay(250);
-        return true;
+    const texts = reader.mainModalTexts();
+    return texts.some(
+        t =>
+            /welcome to runescape/i.test(t) ||
+            /unread messages?/i.test(t) ||
+            /jagex staff will never email/i.test(t)
+    );
+}
+
+/**
+ * Always dismiss "Welcome to RuneScape" by clicking Close Window (top-right).
+ * Retries until the modal is gone.
+ * @returns {Promise<boolean>} true if we acted on / closed it
+ */
+async function dismissWelcomeScreen() {
+    if (!isWelcomeModalOpen()) {
+        return false;
     }
-    if (typeof actions.closeMainModal === 'function' && actions.closeMainModal(main)) {
-        await Execution.delay(250);
-        return true;
+    const host = welcomeHost();
+    if (!host?.reader || !host?.actions) {
+        return false;
     }
-    if (typeof reader.buttonByText === 'function' && typeof actions.ifButton === 'function') {
-        let btn = reader.buttonByText(main, 'Close Window');
-        if (btn === -1) {
-            btn = reader.buttonByText(main, 'Close');
+    const { reader, actions } = host;
+
+    for (let attempt = 0; attempt < 8 && isWelcomeModalOpen(); attempt++) {
+        const main = reader.modals().main;
+        if (main === -1) {
+            break;
         }
-        if (btn !== -1 && actions.ifButton(btn)) {
-            await Execution.delay(250);
-            return true;
+
+        // Prefer real Close Window (top-right BUTTON_CLOSE).
+        let clicked = typeof actions.closeModal === 'function' && actions.closeModal();
+
+        if (!clicked && typeof reader.closeButtonComId === 'function' && typeof actions.ifButton === 'function') {
+            const closeId = reader.closeButtonComId(main);
+            if (closeId !== -1) {
+                clicked = !!actions.ifButton(closeId);
+            }
         }
+
+        if (!clicked && typeof reader.buttonByText === 'function' && typeof actions.ifButton === 'function') {
+            for (const label of ['Close Window', 'Close']) {
+                const btn = reader.buttonByText(main, label);
+                if (btn !== -1 && actions.ifButton(btn)) {
+                    clicked = true;
+                    break;
+                }
+            }
+        }
+
+        if (!clicked && typeof actions.closeMainModal === 'function') {
+            actions.closeMainModal(main);
+        }
+
+        await Execution.delay(250);
     }
-    return false;
+
+    return !isWelcomeModalOpen();
 }
 const PICKPOCKET_OP = 'Pickpocket';
 const STUN_RE = /been stunned|fail to pick/i;
