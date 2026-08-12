@@ -7,6 +7,7 @@
 
 
 <p align="center">Scripts designed for use on the <a href="https://rs2b2t.com/">https://rs2b2t.com/</a> server.</p>
+<p align="center">My Discord is .benzyme feel free to message me there with any problems!</p>
 
 1. Load the bot client via url: https://w1.rs2b2t.com/rs2b0t/ (Make an account via https://rs2b2t.com/register if you haven't already)
 2. Log into your account
