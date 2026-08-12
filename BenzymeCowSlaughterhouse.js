@@ -1,16 +1,16 @@
 /**
- * AlKharidCowKiller — kill Lumbridge cows, loot Cow hide, bank at Al Kharid.
+ * Benzyme's Cow Slaughterhouse — kill Lumbridge cows, loot Cow hide, bank at Al Kharid.
  * Completely vibe coded by @.benzyme on Discord via Cursor AI
  * Self-contained ESM for rs2b0t Load local script / Load URL.
  */
 const SUPPORTED_API_VERSION = 1;
 const abi = globalThis.__rs2b0t;
 if (!abi) {
-    throw new Error('AlKharidCowKiller: globalThis.__rs2b0t missing — load inside rs2b0t bot.html');
+    throw new Error("Benzyme's Cow Slaughterhouse: globalThis.__rs2b0t missing — load inside rs2b0t bot.html");
 }
 if (abi.apiVersion !== SUPPORTED_API_VERSION) {
     throw new Error(
-        `AlKharidCowKiller: ABI ${abi.apiVersion} != supported ${SUPPORTED_API_VERSION}`
+        `Benzyme's Cow Slaughterhouse: ABI ${abi.apiVersion} != supported ${SUPPORTED_API_VERSION}`
     );
 }
 
@@ -31,7 +31,7 @@ const {
     ChatDialog
 } = abi;
 
-const SCRIPT_NAME = 'AlKharidCowKiller';
+const SCRIPT_NAME = "Benzyme's Cow Slaughterhouse";
 
 /** Post-login welcome modal interface id (Close Window top-right). */
 const WELCOME_SCREEN_ID = 5993;
@@ -39,8 +39,12 @@ const WELCOME_SCREEN_ID = 5993;
 /** Lumbridge cow pen east of the castle / north of the windmill. */
 const COW_SPOT = new Tile(3255, 3275, 0);
 const LEASH = 14;
+/** Considered inside the pen (past the front gate). */
+const INSIDE_RADIUS = 7;
 /** Only loot hides this far from camp. */
 const LOOT_LEASH = 12;
+/** Common south / front gate into the cow pen. */
+const PEN_GATE = new Tile(3253, 3266, 0);
 
 /** Al Kharid bank stand (west of the palace). */
 const BANK_STAND = new Tile(3269, 3167, 0);
@@ -48,7 +52,6 @@ const BANK_STAND = new Tile(3269, 3167, 0);
 const HIDE_NAME = 'Cow hide';
 const DEATH_RE = /oh dear.*you are dead/i;
 const CANT_REACH_RE = /i can't reach that/i;
-const TOWARD_SLACK = 4;
 
 /** Melee styles that train a single combat skill. */
 const TRAINABLE = ['attack', 'strength', 'defence'];
@@ -141,10 +144,6 @@ function inCowCamp(tile, radius = LEASH) {
         return false;
     }
     return Tile.from(tile).distanceTo(COW_SPOT) <= radius;
-}
-
-function towardDest(door, here, dest) {
-    return cheb(door, dest) <= cheb(here, dest) + TOWARD_SLACK;
 }
 
 function isShutDoor(loc) {
@@ -291,7 +290,7 @@ function unlockPausedPrefsUi() {
     }
 }
 
-class AlKharidCowKiller extends LoopingBot {
+class BenzymeCowSlaughterhouse extends LoopingBot {
     recovering = false;
     deaths = 0;
     kills = 0;
@@ -454,6 +453,11 @@ class AlKharidCowKiller extends LoopingBot {
             return;
         }
 
+        // Stuck at the closed front gate — open it and walk into the pen.
+        if (await this.ensurePenAccess()) {
+            return;
+        }
+
         if (Tile.from(here).distanceTo(COW_SPOT) > LEASH) {
             this.status = 'walking to cows';
             this.log(`walking to cow pen ${COW_SPOT.x},${COW_SPOT.z}`);
@@ -462,12 +466,15 @@ class AlKharidCowKiller extends LoopingBot {
                 log: msg => this.log(`  ${msg}`)
             });
             if (!ok) {
-                this.log('path to cows failed — retrying');
+                this.log('path to cows failed — trying pen gate');
+                if (await this.ensurePenAccess({ force: true })) {
+                    return;
+                }
             }
             return;
         }
 
-        // One more hide check at camp before clicking Attack.
+        // Inside / at camp: hides again, then only then attack.
         if (await this.lootHides()) {
             return;
         }
@@ -497,7 +504,7 @@ class AlKharidCowKiller extends LoopingBot {
         const hidePh = hrs > 0.008 ? this.hidesLooted / hrs : 0;
 
         const lines = [
-            `Al Kharid Cow Killer`,
+            `Benzyme's Cow Slaughterhouse`,
             `time ${fmtElapsed(elapsed)}  ·  ${this.status}`,
             `kills ${this.kills}  hides ${this.hidesLooted} (${fmtXph(hidePh)}/hr)  inv ${hideCount()}`,
             `bank trips ${this.bankTrips}  deaths ${this.deaths}`
@@ -657,11 +664,15 @@ class AlKharidCowKiller extends LoopingBot {
             return;
         }
 
-        this.log("can't reach that — opening gate/door then retrying");
-        this.status = 'opening gate';
-        const opened = await this.openDoorToward(targetTile);
-        if (!opened) {
-            this.log('no shut gate/door found toward that cow');
+        this.log("can't reach that — opening pen gate and re-entering");
+        this.status = 'opening pen gate';
+        if (!(await this.ensurePenAccess({ force: true }))) {
+            this.log('could not open / enter pen — will retry');
+            return;
+        }
+
+        // After re-entering: hides first, cows second.
+        if (await this.lootHides()) {
             return;
         }
 
@@ -671,7 +682,7 @@ class AlKharidCowKiller extends LoopingBot {
                 .nearest() ?? this.findAttackableCow();
 
         if (!again) {
-            this.log('cow gone after opening gate');
+            this.log('cow gone after entering pen');
             return;
         }
 
@@ -716,14 +727,46 @@ class AlKharidCowKiller extends LoopingBot {
 
     /**
      * Take nearby Cow hide piles inside the camp.
-     * @returns {Promise<boolean>} true if this loop looted
+     * Opens the pen gate and re-enters if Take can't reach through a closed gate.
+     * @returns {Promise<boolean>} true if this loop looted (or spent time entering to loot)
      */
     async lootHides() {
         if (Inventory.isFull()) {
             return false;
         }
 
-        const ground =
+        const ground = this.findNearestHide();
+        if (!ground) {
+            return false;
+        }
+
+        const before = hideCount();
+        this.status = 'looting hide';
+        this.log(`taking ${ground.name ?? HIDE_NAME}`);
+        this.cantReach = false;
+        await ground.interact('Take');
+        await Execution.delayUntil(
+            () => hideCount() > before || Inventory.isFull() || this.cantReach,
+            5000
+        );
+        this.noteHides();
+
+        if (hideCount() > before || Inventory.isFull()) {
+            return true;
+        }
+
+        if (this.cantReach) {
+            this.log("can't reach hide — opening pen gate and re-entering");
+            if (await this.ensurePenAccess({ force: true })) {
+                return true;
+            }
+        }
+
+        return true;
+    }
+
+    findNearestHide() {
+        return (
             GroundItems.query()
                 .name(HIDE_NAME)
                 .within(LOOT_LEASH + 2)
@@ -733,50 +776,113 @@ class AlKharidCowKiller extends LoopingBot {
                 .where(g => isCowHideName(g.name))
                 .within(LOOT_LEASH + 2)
                 .where(g => inCowCamp(g.tile(), LOOT_LEASH))
-                .nearest();
-
-        if (!ground) {
-            return false;
-        }
-
-        const before = hideCount();
-        this.status = 'looting hide';
-        this.log(`taking ${ground.name ?? HIDE_NAME}`);
-        await ground.interact('Take');
-        await Execution.delayUntil(() => hideCount() > before || Inventory.isFull(), 5000);
-        this.noteHides();
-        return true;
-    }
-
-    findShutDoorToward(toward) {
-        const here = Game.tile();
-        if (!here) {
-            return null;
-        }
-        return (
-            Locs.query()
-                .where(l => isShutDoor(l))
-                .within(8)
-                .where(l => towardDest(l.tile(), here, toward))
-                .nearest() ??
-            Locs.query().where(l => isShutDoor(l)).within(6).nearest()
+                .nearest()
         );
     }
 
-    async openDoorToward(toward, knownDoor = null) {
+    /** Shut gate only at the cow paddock front (ignore every other gate/door). */
+    findShutPenGate() {
+        return (
+            Locs.query()
+                .where(l => isShutDoor(l))
+                .within(10)
+                .where(l => {
+                    const t = l.tile();
+                    return (
+                        Math.abs(t.x - PEN_GATE.x) <= 2 &&
+                        Math.abs(t.z - PEN_GATE.z) <= 2 &&
+                        (t.level ?? 0) === (PEN_GATE.level ?? 0)
+                    );
+                })
+                .nearest() ?? null
+        );
+    }
+
+    isInsidePen(tile = Game.tile()) {
+        if (!tile) {
+            return false;
+        }
+        return Tile.from(tile).distanceTo(COW_SPOT) <= INSIDE_RADIUS;
+    }
+
+    /**
+     * If we're stuck outside a closed pen gate (or forced after can't-reach),
+     * open the gate and walk into the pen.
+     * @returns {Promise<boolean>} true if this loop spent time on the gate / enter
+     */
+    async ensurePenAccess(opts = {}) {
+        const force = opts.force === true;
         const here = Game.tile();
         if (!here) {
             return false;
         }
 
-        const door = knownDoor ?? this.findShutDoorToward(toward);
-        if (!door) {
+        const nearPen = Tile.from(here).distanceTo(COW_SPOT) <= LEASH + 8;
+        if (!nearPen && !force) {
             return false;
         }
 
-        const t = door.tile();
+        // Only the cow paddock gate — never open bank/path/other gates.
+        const shut = this.findShutPenGate();
+
+        // Already deep inside and no shut paddock gate in the way — nothing to do.
+        if (this.isInsidePen(here) && !shut && !force) {
+            return false;
+        }
+
+        // Outside / at the front with a closed paddock gate (or forced after can't-reach).
+        if (!shut && !force) {
+            return false;
+        }
+
+        if (shut) {
+            this.status = 'opening pen gate';
+            this.log(
+                `pen gate shut @ ${shut.tile().x},${shut.tile().z} — opening and entering`
+            );
+            const opened = await this.openPenGate(shut);
+            if (!opened) {
+                this.log('failed to open pen gate');
+                return true;
+            }
+        } else if (force) {
+            this.log('no shut paddock gate found — walking into pen anyway');
+        }
+
+        this.status = 'entering pen';
+        this.log(`walking into cow pen ${COW_SPOT.x},${COW_SPOT.z}`);
+        await Traversal.walkResilient(COW_SPOT, {
+            radius: 3,
+            timeoutMs: 30_000,
+            log: m => this.log(`  ${m}`)
+        });
+        return true;
+    }
+
+    /** Open only the known cow paddock gate (never other gates/doors). */
+    async openPenGate(knownGate = null) {
+        const here = Game.tile();
+        if (!here) {
+            return false;
+        }
+
+        const gate = knownGate ?? this.findShutPenGate();
+        if (!gate) {
+            return false;
+        }
+
+        const t = gate.tile();
+        // Refuse anything that isn't the paddock pin.
+        if (
+            Math.abs(t.x - PEN_GATE.x) > 2 ||
+            Math.abs(t.z - PEN_GATE.z) > 2 ||
+            (t.level ?? 0) !== (PEN_GATE.level ?? 0)
+        ) {
+            return false;
+        }
+
         if (cheb(here, t) > 1) {
-            this.log(`walking to ${door.name} at ${t.x},${t.z}`);
+            this.log(`walking to ${gate.name} at ${t.x},${t.z}`);
             await Traversal.walkTo(t, { radius: 1, timeoutMs: 15_000 });
         }
 
@@ -864,11 +970,11 @@ class AlKharidCowKiller extends LoopingBot {
 
 export default defineBot({
     name: SCRIPT_NAME,
-    version: '1.0.1',
+    version: '1.1.0',
     category: 'Combat',
     tags: ['cow', 'cowhide', 'lumbridge', 'al-kharid', 'melee', 'bank', 'xp'],
     description:
-        'Kills cows in the Lumbridge cow pen, loots Cow hide, and banks full inventories at Al Kharid.',
+        'Benzyme\'s Cow Slaughterhouse — opens the pen gate if stuck outside, prioritises cowhides over combat, banks at Al Kharid.',
     settingsSchema: {
         autoLowest: {
             type: 'boolean',
@@ -897,5 +1003,5 @@ export default defineBot({
             help: 'Fixed combat style when auto-lowest is off'
         }
     },
-    create: () => new AlKharidCowKiller()
+    create: () => new BenzymeCowSlaughterhouse()
 });

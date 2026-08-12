@@ -1,6 +1,6 @@
 /**
  * CatherbyNetFisher — small-net shrimp at Catherby (Net+Bait spots only).
- * Start: unequip all → bank everything → withdraw Small fishing net only.
+ * Start: bank open → deposit all → unequip all → deposit again → withdraw Small fishing net only.
  * Optional cook on the bank-house Range on the way to the bank, then bank + return.
  * Completely vibe coded by @.benzyme on Discord via Cursor AI
  * Self-contained ESM for rs2b0t Load local script / Load URL.
@@ -477,8 +477,8 @@ class CatherbyNetFisher extends LoopingBot {
         });
 
         this.log(
-            `CatherbyNetFisher @ ${ANCHOR.x},${ANCHOR.z} — first unequip + bank all, ` +
-                `withdraw Small fishing net only; Net+Bait shrimp; ` +
+            `CatherbyNetFisher @ ${ANCHOR.x},${ANCHOR.z} — start always banks everything ` +
+                `(deposit → unequip → deposit → withdraw Small fishing net only); Net+Bait shrimp; ` +
                 `cook on way to bank: ${this.cookOnWay ? 'on' : 'off'}`
         );
         this.status = 'start: bank';
@@ -932,40 +932,52 @@ class CatherbyNetFisher extends LoopingBot {
         }
     }
 
-    /**
-     * Script start: unequip everything → deposit inventory → withdraw Small fishing net → shore.
-     * Skips the bank trip when already net-only with nothing equipped.
-     */
-    async prepStartInv() {
-        if (readyToFish()) {
-            this.startReady = true;
-            this.status = 'returning to shore';
-            this.log('start ready (skip bank) — Small fishing net only, nothing equipped');
-            await Traversal.walkResilient(ANCHOR, {
-                radius: 3,
-                log: m => this.log(`  ${m}`)
-            });
-            return;
+    /** Deposit every inventory slot (including nets) while the bank is open. */
+    async depositEverythingOpenBank() {
+        if (!Bank.isOpen()) {
+            return false;
         }
+        this.log('start: depositing inventory');
+        if (typeof Bank.depositInventory === 'function') {
+            await Bank.depositInventory();
+        } else {
+            await Bank.depositAllMatching(() => true);
+        }
+        await Execution.delayTicks(1);
+        return Inventory.used() === 0;
+    }
 
+    /** Unequip every worn item into free inventory space. */
+    async unequipEverything() {
         this.status = 'start: unequip';
-
         for (const worn of Equipment.items()) {
             const name = worn.name;
             if (!name) {
                 continue;
             }
+            if (Inventory.isFull()) {
+                this.log('start: inventory full while unequipping — need another deposit');
+                return false;
+            }
             this.log(`start: unequipping ${name}`);
             if (!(await Equipment.unequip(name))) {
                 this.log(`start: could not unequip ${name}`);
                 await Execution.delayTicks(1);
-                return;
+                return false;
             }
             await Execution.delayTicks(1);
         }
+        return nothingEquipped();
+    }
 
+    /**
+     * Script start (always): open bank → deposit all → unequip all → deposit again →
+     * withdraw Small fishing net only → shore. Never starts fishing until that finishes.
+     */
+    async prepStartInv() {
         if (!Bank.isOpen()) {
-            this.log('start: opening bank — deposit all, withdraw Small fishing net');
+            this.status = 'start: bank';
+            this.log('start: opening bank — unequip + bank everything, then withdraw Small fishing net');
             if (
                 !(await Banking.open({
                     stand: BANK_STAND,
@@ -983,17 +995,34 @@ class CatherbyNetFisher extends LoopingBot {
         }
         await Execution.delayTicks(1);
 
-        this.log('start: depositing inventory');
-        if (typeof Bank.depositInventory === 'function') {
-            await Bank.depositInventory();
-        } else {
-            await Bank.depositAllMatching(() => true);
+        // Free inv space first so unequip cannot fail on a full pack.
+        await this.depositEverythingOpenBank();
+
+        if (!(await this.unequipEverything())) {
+            // Still wearing something (or unequip failed) — deposit again for space, retry next loop.
+            await this.depositEverythingOpenBank();
+            await Execution.delayTicks(1);
+            return;
         }
-        await Execution.delayTicks(1);
+
+        // Bank gear that just came off.
+        await this.depositEverythingOpenBank();
+
+        if (!nothingEquipped() || Inventory.used() > 0) {
+            this.log('start: still holding or wearing items — retrying deposit/unequip');
+            await Execution.delayTicks(2);
+            return;
+        }
 
         if (!(await this.withdrawNetFromOpenBank())) {
             await Bank.close();
             await Execution.delayTicks(8);
+            return;
+        }
+
+        if (!readyToFish()) {
+            this.log('start: expected net-only after withdraw — retrying');
+            await Execution.delayTicks(2);
             return;
         }
 
@@ -1062,26 +1091,33 @@ class CatherbyNetFisher extends LoopingBot {
         // After banking raw, lastRawSeen must not credit re-withdraws as new catches.
         this.lastRawSeen = 0;
 
-        // Strip worn gear so deposit can bank it too.
-        for (const worn of Equipment.items()) {
-            const name = worn.name;
-            if (!name) {
-                continue;
-            }
-            this.log(`banking: unequipping ${name}`);
-            if (!(await Equipment.unequip(name))) {
-                this.log(`banking: could not unequip ${name}`);
-                await Execution.delayTicks(1);
-                return;
-            }
-            await Execution.delayTicks(1);
-        }
-
         await Banking.bankNearest({
             destination: { name: 'Catherby', tile: BANK_STAND },
-            // Bank everything (including spare nets), then pull exactly one net back.
+            // Bank everything (including spare nets), then strip gear and pull exactly one net back.
             deposit: () => true,
             afterDeposit: async () => {
+                // Deposit first freed space; unequip any remaining worn gear, deposit again, then net.
+                if (!nothingEquipped()) {
+                    for (const worn of Equipment.items()) {
+                        const name = worn.name;
+                        if (!name) {
+                            continue;
+                        }
+                        this.log(`banking: unequipping ${name}`);
+                        if (!(await Equipment.unequip(name))) {
+                            this.log(`banking: could not unequip ${name}`);
+                            await Execution.delayTicks(1);
+                            break;
+                        }
+                        await Execution.delayTicks(1);
+                    }
+                    if (typeof Bank.depositInventory === 'function') {
+                        await Bank.depositInventory();
+                    } else {
+                        await Bank.depositAllMatching(() => true);
+                    }
+                    await Execution.delayTicks(1);
+                }
                 await this.withdrawNetFromOpenBank();
             },
             returnTo: ANCHOR,
@@ -1131,11 +1167,11 @@ class CatherbyNetFisher extends LoopingBot {
 
 export default defineBot({
     name: SCRIPT_NAME,
-    version: '2.1.0',
+    version: '2.1.1',
     category: 'Fishing',
     tags: ['fishing', 'catherby', 'net', 'shrimp', 'bank', 'cook'],
     description:
-        "Benzyme's Catherby Fisher — unequips and banks everything, withdraws Small fishing net only, then small-net shrimp at Net+Bait spots. Optional cook on bank-house Range on the way to bank.",
+        "Benzyme's Catherby Fisher — on start always deposits, unequips, banks everything, withdraws Small fishing net only, then small-net shrimp at Net+Bait spots. Optional cook on bank-house Range on the way to bank.",
     settingsSchema: {
         cookOnWay: {
             type: 'boolean',

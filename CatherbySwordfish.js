@@ -1,18 +1,18 @@
 /**
- * CatherbyBaitFisher — bait-rod sardine/herring at Catherby (Net+Bait spots only).
- * Withdraws Fishing rod + all Fishing bait from bank. Banks everything else (fish, coins, junk).
- * If rod/bait missing, buys from Harry (rod 5gp; bait up to 500). Optional cook / sell to Harry.
+ * CatherbySwordfish — harpoon tuna/swordfish at Catherby (Cage+Harpoon spots only).
+ * Withdraws Harpoon from bank before fishing. If none in bank, buys one from Harry.
+ * Optional cook on bank-house Range (tuna + swordfish), optional sell catch to Harry, then return to shore.
  * Completely vibe coded by @.benzyme on Discord via Cursor AI
  * Self-contained ESM for rs2b0t Load local script / Load URL.
  */
 const SUPPORTED_API_VERSION = 1;
 const abi = globalThis.__rs2b0t;
 if (!abi) {
-    throw new Error('CatherbyBaitFisher: globalThis.__rs2b0t missing — load inside rs2b0t bot.html');
+    throw new Error('CatherbySwordfish: globalThis.__rs2b0t missing — load inside rs2b0t bot.html');
 }
 if (abi.apiVersion !== SUPPORTED_API_VERSION) {
     throw new Error(
-        `CatherbyBaitFisher: ABI ${abi.apiVersion} != supported ${SUPPORTED_API_VERSION}`
+        `CatherbySwordfish: ABI ${abi.apiVersion} != supported ${SUPPORTED_API_VERSION}`
     );
 }
 
@@ -35,7 +35,7 @@ const {
     withdrawOp
 } = abi;
 
-const SCRIPT_NAME = 'CatherbyBaitFisher';
+const SCRIPT_NAME = 'CatherbySwordfish';
 
 /** Post-login welcome modal interface id (Close Window top-right). */
 const WELCOME_SCREEN_ID = 5993;
@@ -137,18 +137,13 @@ const RANGE_STAND = new Tile(2817, 3443, 0);
 const RANGE_LOC = new Tile(2817, 3444, 0);
 const RANGE_LEASH = 8;
 
-const ROD_NAME = 'Fishing rod';
-const BAIT_NAME = 'Fishing bait';
+const HARPOON_NAME = 'Harpoon';
 const SPOT_NAME = 'Fishing spot';
-/** Cap for bait purchased from Harry when the bank is empty. */
-const BAIT_BUY_MAX = 500;
-/** Harry's Fishing bait baseline cost (gp each). */
-const BAIT_COST = 3;
-/** Harry's Fishing rod baseline cost (gp). */
-const ROD_COST = 5;
+/** Harry's Harpoon baseline cost (gp). */
+const HARPOON_COST = 5;
 
-/** Raw names Harry buys that we catch (bait on Net+Bait). */
-const HARRY_BUY_RAW = new Set(['raw sardine', 'raw herring']);
+/** Raw names Harry buys that we catch (harpoon on Cage+Harpoon). */
+const HARRY_BUY_RAW = new Set(['raw tuna', 'raw swordfish']);
 
 function fmtXph(n) {
     if (n >= 100_000) {
@@ -231,7 +226,7 @@ function unlockPausedPrefsUi() {
     }
 }
 
-const PAINT_FONT_ID = 'benzyme-catherby-bait-font-v1';
+const PAINT_FONT_ID = 'benzyme-catherby-swordfish-font-v1';
 const PAINT_FONT = '13px Exo, "Bebas Neue", "Bitcount Ink", sans-serif';
 
 function ensurePaintFont() {
@@ -252,12 +247,10 @@ function isKeepGear(name) {
     if (!name) {
         return false;
     }
-    const n = name.toLowerCase();
-    // Only fishing tools stay in the pack — everything else is banked.
-    return n === 'fishing rod' || n === 'fishing bait';
+    return name.toLowerCase() === 'harpoon';
 }
 
-function isRawBaitFish(name) {
+function isRawHarpoonFish(name) {
     if (!name) {
         return false;
     }
@@ -265,10 +258,10 @@ function isRawBaitFish(name) {
     if (!n.startsWith('raw ')) {
         return false;
     }
-    return n.includes('sardine') || n.includes('herring');
+    return n.includes('tuna') || n.includes('swordfish');
 }
 
-function isCookedBaitFish(name) {
+function isCookedHarpoonFish(name) {
     if (!name) {
         return false;
     }
@@ -276,7 +269,7 @@ function isCookedBaitFish(name) {
     if (n.startsWith('raw ') || n.startsWith('burnt ')) {
         return false;
     }
-    return n === 'sardine' || n === 'herring';
+    return n === 'tuna' || n === 'swordfish';
 }
 
 function isBurntFish(name) {
@@ -284,11 +277,12 @@ function isBurntFish(name) {
         return false;
     }
     const n = name.toLowerCase();
-    return n.startsWith('burnt ') || n === 'burnt fish';
-}
-
-function isBankableFish(name) {
-    return isRawBaitFish(name) || isCookedBaitFish(name) || isBurntFish(name);
+    return (
+        n.startsWith('burnt ') ||
+        n === 'burnt fish' ||
+        n === 'burnt tuna' ||
+        n === 'burnt swordfish'
+    );
 }
 
 function isHarrySellable(name) {
@@ -299,21 +293,21 @@ function isHarrySellable(name) {
 }
 
 /**
- * Cooking level to cook each raw (not fishing level).
- * Sardine: Cooking 1. Herring: Cooking 5. Fishing: sardine 5 / herring 10.
+ * Cooking level for each raw (not fishing level).
+ * Tuna: Fishing 35 / Cooking 30. Swordfish: Fishing 50 / Cooking 45.
  */
 const COOK_LEVEL = {
-    sardine: 1,
-    herring: 5
+    tuna: 30,
+    swordfish: 45
 };
 
 function fishKind(name) {
     const n = (name ?? '').toLowerCase();
-    if (n.includes('herring')) {
-        return 'herring';
+    if (n.includes('swordfish')) {
+        return 'swordfish';
     }
-    if (n.includes('sardine')) {
-        return 'sardine';
+    if (n.includes('tuna')) {
+        return 'tuna';
     }
     return null;
 }
@@ -341,15 +335,15 @@ function countMatching(pred) {
 }
 
 function rawFishCount() {
-    return countMatching(isRawBaitFish);
+    return countMatching(isRawHarpoonFish);
 }
 
 function cookableCount() {
-    return countMatching(n => isRawBaitFish(n) && canCookRaw(n));
+    return countMatching(n => isRawHarpoonFish(n) && canCookRaw(n));
 }
 
 function cookedFishCount() {
-    return countMatching(isCookedBaitFish);
+    return countMatching(isCookedHarpoonFish);
 }
 
 function burntCount() {
@@ -368,7 +362,7 @@ function lastCookableRaw() {
     const items = Inventory.items();
     for (let i = items.length - 1; i >= 0; i--) {
         const name = items[i].name;
-        if (isRawBaitFish(name) && canCookRaw(name)) {
+        if (isRawHarpoonFish(name) && canCookRaw(name)) {
             return items[i];
         }
     }
@@ -378,7 +372,7 @@ function lastCookableRaw() {
 function countCookableNamed(fragment) {
     const want = fragment.toLowerCase();
     return countMatching(
-        n => isRawBaitFish(n) && canCookRaw(n) && (n ?? '').toLowerCase().includes(want)
+        n => isRawHarpoonFish(n) && canCookRaw(n) && (n ?? '').toLowerCase().includes(want)
     );
 }
 
@@ -399,7 +393,7 @@ function matchCookProduct(products, preferName) {
             return soft;
         }
     }
-    for (const frag of ['herring', 'sardine']) {
+    for (const frag of ['swordfish', 'tuna']) {
         if (countCookableNamed(frag) <= 0) {
             continue;
         }
@@ -411,20 +405,12 @@ function matchCookProduct(products, preferName) {
     return products[0] ?? null;
 }
 
-function hasRod() {
-    return Inventory.items().some(i => (i.name ?? '').toLowerCase() === 'fishing rod');
-}
-
-function baitCount() {
-    return countMatching(n => (n ?? '').toLowerCase() === 'fishing bait');
-}
-
-function hasBait() {
-    return baitCount() > 0;
+function hasHarpoon() {
+    return Inventory.items().some(i => (i.name ?? '').toLowerCase() === 'harpoon');
 }
 
 function needsGear() {
-    return !hasRod() || !hasBait();
+    return !hasHarpoon();
 }
 
 function isCoins(name) {
@@ -435,25 +421,17 @@ function coinCount() {
     return countMatching(isCoins);
 }
 
-/** How many bait to buy from Harry when completely out (cap 500). */
-function baitBuyWant() {
-    if (baitCount() > 0) {
-        return 0;
-    }
-    return BAIT_BUY_MAX;
+function cageOp(actions) {
+    return actions.find(a => /^cage$/i.test(a)) ?? null;
 }
 
-function netOp(actions) {
-    return actions.find(a => /^net$/i.test(a)) ?? null;
+function harpoonOp(actions) {
+    return actions.find(a => /^harpoon$/i.test(a)) ?? null;
 }
 
-function baitOp(actions) {
-    return actions.find(a => /^bait$/i.test(a)) ?? null;
-}
-
-/** Sardine/herring hops — Net + Bait (never Net + Harpoon / Lure + Bait). */
-function isNetBaitSpot(actions) {
-    return netOp(actions) !== null && baitOp(actions) !== null;
+/** Tuna/swordfish hops — Cage + Harpoon (never Net+Bait / Lure+Bait). */
+function isCageHarpoonSpot(actions) {
+    return cageOp(actions) !== null && harpoonOp(actions) !== null;
 }
 
 function isShutDoor(loc) {
@@ -468,11 +446,11 @@ function openDoorOp(loc) {
     return loc.actions().find(a => /^open/i.test(a)) ?? null;
 }
 
-function isRodGroundName(name) {
+function isHarpoonGroundName(name) {
     if (!name) {
         return false;
     }
-    return name.toLowerCase() === 'fishing rod';
+    return name.toLowerCase() === 'harpoon';
 }
 
 function harrySellNamesHeld() {
@@ -498,7 +476,7 @@ function countByExactName(name) {
     return countMatching(n => (n ?? '').toLowerCase() === want);
 }
 
-class CatherbyBaitFisher extends LoopingBot {
+class CatherbySwordfish extends LoopingBot {
     status = 'starting';
     startedAt = 0;
     fishXpAtStart = 0;
@@ -511,6 +489,8 @@ class CatherbyBaitFisher extends LoopingBot {
     sold = 0;
     bankTrips = 0;
     sellTrips = 0;
+    /** False until harpoon is in inventory (bank or Harry). */
+    startReady = false;
     /** Preference: cook on Range before banking / selling. */
     cookOnWay = true;
     /** Preference: sell catch to Harry instead of banking. */
@@ -535,6 +515,7 @@ class CatherbyBaitFisher extends LoopingBot {
         this.sold = 0;
         this.bankTrips = 0;
         this.sellTrips = 0;
+        this.startReady = false;
         this.cookingLoad = false;
         this.lastRawSeen = rawFishCount();
 
@@ -545,17 +526,18 @@ class CatherbyBaitFisher extends LoopingBot {
         });
 
         this.log(
-            `CatherbyBaitFisher @ ${ANCHOR.x},${ANCHOR.z} — Bait on Net+Bait only; ` +
+            `CatherbySwordfish @ ${ANCHOR.x},${ANCHOR.z} — Harpoon on Cage+Harpoon only; ` +
+                `withdraw Harpoon first; tuna/swordfish cook-aware; ` +
                 `cook on way: ${this.cookOnWay ? 'on' : 'off'}; ` +
                 `sell to Harry: ${this.sellToHarry ? 'on' : 'off'}`
         );
-        if (!hasRod()) {
-            this.log('WARNING: no Fishing rod — will withdraw from bank (or buy from Harry)');
+        if (hasHarpoon()) {
+            this.startReady = true;
+            this.log('Harpoon already in inventory — ready to fish');
+        } else {
+            this.log('no Harpoon — will withdraw from bank (or buy from Harry)');
         }
-        if (!hasBait()) {
-            this.log('WARNING: no Fishing bait — will withdraw all from bank (or buy from Harry)');
-        }
-        this.status = 'ready';
+        this.status = hasHarpoon() ? 'ready' : 'start: need harpoon';
     }
 
     startPausedPrefUnlock() {
@@ -632,7 +614,7 @@ class CatherbyBaitFisher extends LoopingBot {
         }
 
         if (Shop.isOpen()) {
-            await this.sellOpenHarry();
+            await this.handleOpenHarry();
             return;
         }
 
@@ -653,30 +635,25 @@ class CatherbyBaitFisher extends LoopingBot {
             return;
         }
 
-        if (needsGear()) {
-            if (!hasRod() && (await this.lootRodFromGround())) {
-                this.log('looted Fishing rod');
+        if (!this.startReady || needsGear()) {
+            if (!hasHarpoon() && (await this.lootHarpoonFromGround())) {
+                this.log('looted Harpoon');
+                this.startReady = true;
                 return;
             }
-            this.status = 'need gear';
-            if (!hasRod() || fishForDisposeCount() > 0 || !hasBait()) {
-                this.log(
-                    !hasRod()
-                        ? 'missing rod — banking for Fishing rod (Harry if missing) + bait'
-                        : !hasBait()
-                          ? 'out of bait — bank first, then Harry if needed (max 500)'
-                          : 'banking catch + restocking rod/bait'
-                );
-                await this.bankRestockAndReturn();
+            this.status = 'need Harpoon';
+            this.log(
+                !this.startReady
+                    ? 'start: withdrawing Harpoon from bank (Harry if missing)'
+                    : 'missing Harpoon — bank first, then Harry if needed'
+            );
+            await this.bankRestockAndReturn();
+            if (!hasHarpoon()) {
+                this.log('still no harpoon — buying Harpoon from Harry');
+                await this.buyHarpoonFromHarryAndReturn();
             }
-            if (!hasRod() || !hasBait()) {
-                this.log(
-                    !hasRod()
-                        ? 'still no rod — buying Fishing rod from Harry' +
-                          (!hasBait() ? ` (+ up to ${BAIT_BUY_MAX} bait)` : '')
-                        : `still no bait — buying up to ${BAIT_BUY_MAX} from Harry`
-                );
-                await this.buyGearFromHarryAndReturn();
+            if (hasHarpoon()) {
+                this.startReady = true;
             }
             return;
         }
@@ -710,6 +687,10 @@ class CatherbyBaitFisher extends LoopingBot {
                 await this.disposeCatchAndReturn();
                 return;
             }
+            // Full of junk / unrelated items — bank everything except Harpoon (+ coins).
+            this.log('full inv with no fish — banking irrelevant items');
+            await this.bankRestockAndReturn();
+            return;
         }
 
         const here = Game.tile();
@@ -733,9 +714,9 @@ class CatherbyBaitFisher extends LoopingBot {
             return;
         }
 
-        const spot = this.findBaitSpot();
+        const spot = this.findHarpoonSpot();
         if (!spot) {
-            this.status = 'waiting for Net+Bait spot';
+            this.status = 'waiting for Cage+Harpoon spot';
             if (Tile.from(here).distanceTo(ANCHOR) > STAND_RADIUS) {
                 await Traversal.walkTo(ANCHOR, { radius: 2, timeoutMs: 12_000 });
             }
@@ -743,7 +724,7 @@ class CatherbyBaitFisher extends LoopingBot {
             return;
         }
 
-        await this.baitSpot(spot);
+        await this.harpoonSpot(spot);
     }
 
     /** After cook (or raw full): sell to Harry or bank, then return to shore. */
@@ -755,48 +736,46 @@ class CatherbyBaitFisher extends LoopingBot {
         await this.bankRestockAndReturn();
     }
 
-    findBaitSpot() {
+    findHarpoonSpot() {
         return Npcs.query()
             .name(SPOT_NAME)
-            .where(n => isNetBaitSpot(n.actions()))
+            .where(n => isCageHarpoonSpot(n.actions()))
             .where(n => Tile.from(n.tile()).distanceTo(ANCHOR) <= LEASH)
             .nearest();
     }
 
-    async baitSpot(spot) {
-        const op = baitOp(spot.actions());
+    async harpoonSpot(spot) {
+        const op = harpoonOp(spot.actions());
         if (!op) {
             await Execution.delayTicks(2);
             return;
         }
 
         const before = rawFishCount();
-        const beforeBait = baitCount();
         const st = spot.tile();
-        this.status = `baiting (${spot.distance()}t)`;
-        this.log(`Bait sardine/herring spot @ ${st.x},${st.z}`);
+        this.status = `harpooning (${spot.distance()}t)`;
+        this.log(`Harpoon tuna/swordfish spot @ ${st.x},${st.z}`);
         await spot.interact(op);
 
         await Execution.delayUntil(
             () =>
                 rawFishCount() > before ||
-                baitCount() < beforeBait ||
                 Game.animating() ||
                 ChatDialog.canContinue() ||
-                !this.findBaitSpot(),
+                !this.findHarpoonSpot(),
             8000
         );
         this.noteCatches();
     }
 
-    async lootRodFromGround() {
-        if (hasRod()) {
+    async lootHarpoonFromGround() {
+        if (hasHarpoon()) {
             return true;
         }
         const ground =
-            GroundItems.query().name(ROD_NAME).within(12).nearest() ??
+            GroundItems.query().name(HARPOON_NAME).within(12).nearest() ??
             GroundItems.query()
-                .where(g => isRodGroundName(g.name))
+                .where(g => isHarpoonGroundName(g.name))
                 .within(12)
                 .nearest();
         if (!ground) {
@@ -805,8 +784,8 @@ class CatherbyBaitFisher extends LoopingBot {
         const before = Inventory.used();
         await ground.interact('Take');
         return (
-            (await Execution.delayUntil(() => hasRod() || Inventory.used() > before, 6000)) &&
-            hasRod()
+            (await Execution.delayUntil(() => hasHarpoon() || Inventory.used() > before, 6000)) &&
+            hasHarpoon()
         );
     }
 
@@ -861,7 +840,8 @@ class CatherbyBaitFisher extends LoopingBot {
         const raw = lastCookableRaw();
         const hint = matchCookProduct(products, raw?.name);
         const kind = fishKind(hint) || fishKind(raw?.name);
-        const frag = kind === 'herring' ? 'herring' : kind === 'sardine' ? 'sardine' : null;
+        const frag =
+            kind === 'swordfish' ? 'swordfish' : kind === 'tuna' ? 'tuna' : null;
         const batch = frag
             ? Math.max(1, Math.min(countCookableNamed(frag), 28))
             : Math.max(1, Math.min(cookableCount(), 28));
@@ -1066,11 +1046,12 @@ class CatherbyBaitFisher extends LoopingBot {
             return;
         }
 
-        await this.sellOpenHarry();
+        await this.handleOpenHarry();
     }
 
-    async sellOpenHarry() {
-        this.status = 'selling to Harry';
+    /** Sell catch and/or buy a Harpoon while Harry's shop is open. */
+    async handleOpenHarry() {
+        this.status = 'at Harry';
         let sold = 0;
         for (let guard = 0; guard < 60 && harrySellCount() > 0 && Shop.isOpen(); guard++) {
             const names = harrySellNamesHeld();
@@ -1094,22 +1075,18 @@ class CatherbyBaitFisher extends LoopingBot {
             }
         }
 
-        // Buy rod / top up bait from Harry while the shop is open.
-        if ((!hasRod() || baitBuyWant() > 0) && Shop.isOpen()) {
-            if (!hasRod()) {
-                await this.buyRodInOpenShop();
-            }
-            if (baitBuyWant() > 0) {
-                await this.buyBaitInOpenShop();
-            }
+        if (!hasHarpoon() && Shop.isOpen()) {
+            await this.buyHarpoonInOpenShop();
         }
 
         if (Shop.isOpen()) {
             await Shop.close();
         }
 
-        this.sold += sold;
-        this.sellTrips++;
+        if (sold > 0) {
+            this.sold += sold;
+            this.sellTrips++;
+        }
         this.cookingLoad = false;
 
         if (harrySellCount() > 0) {
@@ -1118,16 +1095,21 @@ class CatherbyBaitFisher extends LoopingBot {
             return;
         }
 
-        // Cooked leftovers Harry won't buy — bank them + restock bait/rod.
-        if (cookedFishCount() > 0 || burntCount() > 0) {
+        // Cooked leftovers Harry won't buy — bank them + restock pot.
+        if (cookedFishCount() > 0 || burntCount() > 0 || !hasHarpoon()) {
+            if (!hasHarpoon()) {
+                // Already tried shop buy; bank for pot / coins next.
+                await this.bankRestockAndReturn();
+                if (!hasHarpoon()) {
+                    await this.buyHarpoonFromHarryAndReturn();
+                }
+                return;
+            }
             await this.bankRestockAndReturn();
             return;
         }
-        if (!hasRod() || !hasBait()) {
-            await this.buyGearFromHarryAndReturn();
-            return;
-        }
 
+        this.startReady = true;
         this.lastRawSeen = rawFishCount();
         this.status = 'returning to shore';
         await Traversal.walkResilient(ANCHOR, {
@@ -1137,8 +1119,8 @@ class CatherbyBaitFisher extends LoopingBot {
     }
 
     /**
-     * Bank fish, withdraw Fishing rod (if needed) + Withdraw-All Fishing bait.
-     * If bank has no rod/bait, withdraw coins for Harry, then buy.
+     * Bank fish + any junk, withdraw Harpoon if needed.
+     * Keeps Harpoon (and coins for Harry). If bank has no harpoon, withdraw coins for a Harry purchase.
      */
     async bankRestockAndReturn() {
         const raw = rawFishCount();
@@ -1149,7 +1131,7 @@ class CatherbyBaitFisher extends LoopingBot {
                 (raw ? ` ${raw} raw` : '') +
                 (cooked ? ` ${cooked} cooked` : '') +
                 (burntCount() ? ` ${burntCount()} burnt` : '') +
-                ` — restock rod + bait`
+                ` — restock Harpoon`
         );
 
         this.lastRawSeen = 0;
@@ -1157,14 +1139,14 @@ class CatherbyBaitFisher extends LoopingBot {
         await Banking.bankNearest({
             destination: { name: 'Catherby', tile: BANK_STAND },
             deposit: name => {
-                // Bank fish, coins, and any unrelated junk — keep only rod + bait.
-                if (isKeepGear(name)) {
+                // Bank fish and any unrelated junk — keep only Harpoon (+ coins for Harry).
+                if (isKeepGear(name) || isCoins(name)) {
                     return false;
                 }
                 return true;
             },
             afterDeposit: async () => await this.withdrawGearFromOpenBank(),
-            // Stay near bank if we still need Harry for rod/bait (don't walk to shore yet).
+            // Stay near bank if we still need Harry for a pot (don't walk to shore yet).
             returnTo: null,
             log: m => this.log(`  ${m}`)
         });
@@ -1173,18 +1155,14 @@ class CatherbyBaitFisher extends LoopingBot {
         this.cookingLoad = false;
         this.lastRawSeen = rawFishCount();
 
-        if (!hasRod() || !hasBait()) {
-            this.log(
-                !hasRod()
-                    ? 'no Fishing rod in bank — buying from Harry' +
-                      (!hasBait() ? ` (+ bait up to ${BAIT_BUY_MAX})` : '')
-                    : `no bait in bank — buying up to ${BAIT_BUY_MAX} from Harry`
-            );
-            await this.buyGearFromHarryAndReturn();
+        if (!hasHarpoon()) {
+            this.log('no Harpoon in bank — buying from Harry');
+            await this.buyHarpoonFromHarryAndReturn();
             return;
         }
 
-        this.log(`gear ready — rod + ${baitCount()} bait`);
+        this.startReady = true;
+        this.log('gear ready — Harpoon');
         this.status = 'returning to shore';
         await Traversal.walkResilient(ANCHOR, {
             radius: 3,
@@ -1193,12 +1171,11 @@ class CatherbyBaitFisher extends LoopingBot {
     }
 
     /**
-     * Walk to Harry, buy Fishing rod if missing and/or bait up to BAIT_BUY_MAX, return to shore.
+     * Walk to Harry, buy one Harpoon, return to shore.
      */
-    async buyGearFromHarryAndReturn() {
-        const needRod = !hasRod();
-        const wantBait = baitBuyWant();
-        if (!needRod && wantBait <= 0) {
+    async buyHarpoonFromHarryAndReturn() {
+        if (hasHarpoon()) {
+            this.startReady = true;
             this.status = 'returning to shore';
             await Traversal.walkResilient(ANCHOR, {
                 radius: 3,
@@ -1207,33 +1184,22 @@ class CatherbyBaitFisher extends LoopingBot {
             return;
         }
 
-        const needGp = (needRod ? ROD_COST : 0) + wantBait * BAIT_COST;
-        if (coinCount() < needGp) {
+        if (coinCount() < HARPOON_COST) {
             this.log(
-                `need ~${needGp}gp for` +
-                    (needRod ? ' Fishing rod' : '') +
-                    (needRod && wantBait > 0 ? ' +' : '') +
-                    (wantBait > 0 ? ` ${wantBait} bait` : '') +
-                    ` (have ${coinCount()}) — withdrawing coins`
+                `need ${HARPOON_COST}gp for Harpoon (have ${coinCount()}) — withdrawing coins`
             );
-            await this.withdrawCoinsForHarry(needGp);
+            await this.withdrawCoinsForHarpoon();
         }
 
-        const minCost = needRod ? ROD_COST : BAIT_COST;
-        if (coinCount() < minCost) {
-            this.log('WARNING: not enough coins to buy rod/bait from Harry');
+        if (coinCount() < HARPOON_COST) {
+            this.log('WARNING: not enough coins to buy Harpoon from Harry');
             this.status = 'need coins';
             await Execution.delayTicks(8);
             return;
         }
 
-        this.status = 'walking to Harry (gear)';
-        this.log(
-            `buying from Harry:` +
-                (needRod ? ' Fishing rod' : '') +
-                (needRod && wantBait > 0 ? ' +' : '') +
-                (wantBait > 0 ? ` up to ${wantBait} bait` : '')
-        );
+        this.status = 'walking to Harry (harpoon)';
+        this.log(`buying Harpoon from Harry (${HARPOON_COST}gp)`);
 
         await Traversal.walkResilient(HARRY_STAND, {
             radius: 2,
@@ -1241,38 +1207,28 @@ class CatherbyBaitFisher extends LoopingBot {
         });
         await this.openNearbyDoor();
 
-        this.status = 'buying gear';
+        this.status = 'buying harpoon';
         if (!(await Shop.open(HARRY_NAME))) {
-            this.log('could not open Harry for gear — retrying next loop');
+            this.log('could not open Harry for harpoon — retrying next loop');
             await Execution.delayTicks(3);
             return;
         }
 
-        if (!hasRod()) {
-            await this.buyRodInOpenShop();
-        }
-        if (baitBuyWant() > 0) {
-            await this.buyBaitInOpenShop();
-        }
+        await this.buyHarpoonInOpenShop();
 
         if (Shop.isOpen()) {
             await Shop.close();
         }
 
-        if (!hasRod()) {
-            this.log('WARNING: still no Fishing rod after Harry — need coins or shop stock');
-            this.status = 'need rod';
-            await Execution.delayTicks(8);
-            return;
-        }
-        if (!hasBait()) {
-            this.log('WARNING: still no Fishing bait after Harry — need coins or shop stock');
-            this.status = 'need bait';
+        if (!hasHarpoon()) {
+            this.log('WARNING: still no Harpoon after Harry — need coins or shop stock');
+            this.status = 'need harpoon';
             await Execution.delayTicks(8);
             return;
         }
 
-        this.log(`gear ready from Harry — rod + ${baitCount()} bait`);
+        this.startReady = true;
+        this.log('bought Harpoon — returning to shore');
         this.lastRawSeen = rawFishCount();
         this.status = 'returning to shore';
         await Traversal.walkResilient(ANCHOR, {
@@ -1281,61 +1237,31 @@ class CatherbyBaitFisher extends LoopingBot {
         });
     }
 
-    /** Buy one Fishing rod from an already-open Harry shop. */
-    async buyRodInOpenShop() {
-        if (!Shop.isOpen() || hasRod()) {
+    /** Buy one Harpoon from an already-open Harry shop. */
+    async buyHarpoonInOpenShop() {
+        if (!Shop.isOpen() || hasHarpoon()) {
             return 0;
         }
 
-        if (coinCount() < ROD_COST) {
-            this.log('cannot afford Fishing rod at Harry');
+        if (coinCount() < HARPOON_COST) {
+            this.log('cannot afford Harpoon at Harry');
             return 0;
         }
 
-        this.status = 'buying Fishing rod';
-        this.log(`Shop.buy 1× ${ROD_NAME}`);
-        const bought = await Shop.buy(ROD_NAME, 1);
+        this.status = 'buying Harpoon';
+        this.log(`Shop.buy 1× ${HARPOON_NAME}`);
+        const bought = await Shop.buy(HARPOON_NAME, 1);
         if (bought > 0) {
-            this.log(`bought ${bought}× ${ROD_NAME} from Harry`);
+            this.log(`bought ${bought}× ${HARPOON_NAME} from Harry`);
         } else {
-            this.log('Harry had no Fishing rod / buy failed');
+            this.log('Harry had no Harpoon / buy failed');
         }
         return bought;
     }
 
-    /** Buy Fishing bait from an already-open Harry shop, capped at BAIT_BUY_MAX total. */
-    async buyBaitInOpenShop() {
-        if (!Shop.isOpen()) {
-            return 0;
-        }
-        let want = baitBuyWant();
-        if (want <= 0) {
-            return 0;
-        }
-
-        // Affordability — don't try to buy more than coins allow.
-        const affordable = Math.floor(coinCount() / BAIT_COST);
-        if (affordable <= 0) {
-            this.log('cannot afford Fishing bait at Harry');
-            return 0;
-        }
-        want = Math.min(want, affordable);
-
-        const before = baitCount();
-        this.status = `buying bait x${want}`;
-        this.log(`Shop.buy ${want}× ${BAIT_NAME} (have ${before}, cap ${BAIT_BUY_MAX})`);
-        const bought = await Shop.buy(BAIT_NAME, want);
-        if (bought > 0) {
-            this.log(`bought ${bought}× ${BAIT_NAME} from Harry`);
-        } else {
-            this.log('Harry had no Fishing bait / buy failed');
-        }
-        return bought;
-    }
-
-    /** Open Catherby bank and withdraw enough coins for Harry rod/bait. */
-    async withdrawCoinsForHarry(needGp) {
-        const short = Math.max(0, needGp - coinCount());
+    /** Open Catherby bank and withdraw enough coins to buy a Harpoon. */
+    async withdrawCoinsForHarpoon() {
+        const short = Math.max(0, HARPOON_COST - coinCount());
         if (short <= 0) {
             return;
         }
@@ -1343,7 +1269,8 @@ class CatherbyBaitFisher extends LoopingBot {
         await Banking.bankNearest({
             destination: { name: 'Catherby', tile: BANK_STAND },
             deposit: name => {
-                if (isKeepGear(name)) {
+                // Bank fish and any unrelated junk — keep only Harpoon (+ coins for Harry).
+                if (isKeepGear(name) || isCoins(name)) {
                     return false;
                 }
                 return true;
@@ -1353,28 +1280,17 @@ class CatherbyBaitFisher extends LoopingBot {
                 if (!Bank.isOpen()) {
                     return;
                 }
-                // Prefer withdrawing the rod if it appeared.
-                if (!hasRod()) {
-                    const rodBank = Bank.items().find(
-                        i => (i.name ?? '').toLowerCase() === 'fishing rod'
-                    );
-                    if (rodBank) {
-                        const op =
-                            (typeof withdrawOp === 'function'
-                                ? withdrawOp(rodBank.ops, '1')
-                                : null) ?? 'Withdraw-1';
-                        this.log('withdrawing Fishing rod');
-                        await Bank.withdraw(ROD_NAME, op);
-                        await Execution.delayTicks(1);
-                    }
+                // Prefer withdrawing the pot if it appeared.
+                if (await this.withdrawGearFromOpenBank()) {
+                    return;
                 }
                 const bankGp = Bank.count('Coins') || 0;
                 if (bankGp <= 0) {
-                    this.log('WARNING: no Coins in bank for Harry gear');
+                    this.log('WARNING: no Coins in bank for Harry harpoon');
                     return;
                 }
                 const take = Math.min(short, bankGp);
-                this.log(`withdrawing ${take} Coins for Harry gear`);
+                this.log(`withdrawing ${take} Coins for Harry Harpoon`);
                 await Bank.withdrawX('Coins', take);
                 await Execution.delayTicks(1);
             },
@@ -1383,61 +1299,46 @@ class CatherbyBaitFisher extends LoopingBot {
         });
     }
 
+    /** @returns {Promise<boolean>} true if harpoon is in inventory after */
     async withdrawGearFromOpenBank() {
         if (!Bank.isOpen()) {
-            return;
+            return hasHarpoon();
         }
         await Execution.delayUntil(() => Bank.loaded() || !Bank.isOpen(), 3000);
         if (!Bank.isOpen()) {
-            return;
+            return hasHarpoon();
         }
 
-        let needHarryGp = 0;
-
-        if (!hasRod()) {
-            const rodBank = Bank.items().find(
-                i => (i.name ?? '').toLowerCase() === 'fishing rod'
-            );
-            if (rodBank) {
-                const op =
-                    (typeof withdrawOp === 'function'
-                        ? withdrawOp(rodBank.ops, '1')
-                        : null) ?? 'Withdraw-1';
-                this.log('withdrawing Fishing rod');
-                await Bank.withdraw(ROD_NAME, op);
-                await Execution.delayTicks(1);
-            } else {
-                this.log('WARNING: no Fishing rod in bank — will buy from Harry');
-                needHarryGp += ROD_COST;
-            }
+        if (hasHarpoon()) {
+            return true;
         }
 
-        const baitBank = Bank.items().find(
-            i => (i.name ?? '').toLowerCase() === 'fishing bait'
+        const harpoonBank = Bank.items().find(
+            i => (i.name ?? '').toLowerCase() === 'harpoon'
         );
-        if (baitBank && (baitBank.count ?? 0) > 0) {
-            const allOp =
+        if (harpoonBank) {
+            const op =
                 (typeof withdrawOp === 'function'
-                    ? withdrawOp(baitBank.ops, 'all')
-                    : null) ?? 'Withdraw-All';
-            const before = baitCount();
-            this.log(`withdrawing all Fishing bait (bank has ${baitBank.count})`);
-            await Bank.withdraw(BAIT_NAME, allOp);
-            await Execution.delayUntil(() => baitCount() > before || !Bank.isOpen(), 4000);
-        } else if (!hasBait()) {
-            const want = baitBuyWant();
-            needHarryGp += want * BAIT_COST;
-            this.log('WARNING: no Fishing bait in bank — will buy from Harry');
+                    ? withdrawOp(harpoonBank.ops, '1')
+                    : null) ?? 'Withdraw-1';
+            this.log('withdrawing Harpoon');
+            await Bank.withdraw(HARPOON_NAME, op);
+            await Execution.delayTicks(1);
+            return hasHarpoon();
         }
 
-        const short = Math.max(0, needHarryGp - coinCount());
+        // Prepare coins for Harry.
+        const short = Math.max(0, HARPOON_COST - coinCount());
         const bankGp = Bank.count('Coins') || 0;
         if (short > 0 && bankGp > 0) {
             const take = Math.min(short, bankGp);
-            this.log(`withdrawing ${take} Coins for Harry rod/bait`);
+            this.log(`no bank harpoon — withdrawing ${take} Coins for Harry Harpoon`);
             await Bank.withdrawX('Coins', take);
             await Execution.delayTicks(1);
+        } else {
+            this.log('WARNING: no Harpoon in bank');
         }
+        return hasHarpoon();
     }
 
     onPaint(ctx) {
@@ -1461,13 +1362,13 @@ class CatherbyBaitFisher extends LoopingBot {
               : 'bank raw';
 
         const lines = [
-            `Benzyme's Catherby Bait  Fish ${Skills.level('fishing')}  Cook ${Skills.level('cooking')}`,
+            `Benzyme's Catherby Swordfish  Fish ${Skills.level('fishing')}  Cook ${Skills.level('cooking')}`,
             `time ${fmtElapsed(elapsed)}  ·  ${mode}  ·  ${this.status}`,
             `caught ${this.caught} (${fmtXph(caughtPh)}/hr)  cooked ${this.cooked} (${fmtXph(cookedPh)}/hr)` +
                 (this.sellToHarry || this.sold > 0
                     ? `  sold ${this.sold} (${fmtXph(soldPh)}/hr)`
                     : ''),
-            `bait ${baitCount()}  bank ${this.bankTrips}` +
+            `harpoon ${hasHarpoon() ? 'yes' : 'NO'}  bank ${this.bankTrips}` +
                 (this.sellToHarry || this.sellTrips > 0 ? `  sells ${this.sellTrips}` : '') +
                 `  Fish XP ${fmtXph(fishXph)}/hr` +
                 (this.cookOnWay || cookXp > 0 ? `  Cook XP ${fmtXph(cookXph)}/hr` : '')
@@ -1493,9 +1394,9 @@ export default defineBot({
     name: SCRIPT_NAME,
     version: '1.0.0',
     category: 'Fishing',
-    tags: ['fishing', 'catherby', 'bait', 'sardine', 'herring', 'bank', 'cook', 'harry'],
+    tags: ['fishing', 'catherby', 'harpoon', 'tuna', 'swordfish', 'bank', 'cook', 'harry'],
     description:
-        "Benzyme's Catherby Bait Fisher — bait sardine/herring on Net+Bait spots only. Withdraws rod + bait from bank; if rod or bait is missing, buys from Harry (rod 5gp; bait up to 500). Optional cook on way; optional sell to Harry instead of banking.",
+        "Benzyme's Catherby Swordfish — harpoons tuna/swordfish on Cage+Harpoon spots. Withdraws Harpoon from bank before fishing; buys one from Harry if missing. Optional cook on way (tuna Cooking 30+, swordfish 45+); optional sell raw catch to Harry instead of banking.",
     settingsSchema: {
         cookOnWay: {
             type: 'boolean',
@@ -1503,7 +1404,7 @@ export default defineBot({
             label: 'Cook on way to bank',
             group: 'Cooking',
             help:
-                'When the pack is full, cook Raw sardine/herring on the Catherby bank-house Range, drop burnt, then bank or sell to Harry'
+                'When the pack is full, cook Raw tuna (Cooking 30+) and Raw swordfish (Cooking 45+) on the Catherby bank-house Range, drop burnt, then bank or sell to Harry'
         },
         sellToHarry: {
             type: 'boolean',
@@ -1511,8 +1412,8 @@ export default defineBot({
             label: 'Sell to Harry',
             group: 'Sell',
             help:
-                'Sell Raw sardine/herring to Harry at the Catherby fishing shop instead of banking, then return to bait fishing. Cooked leftovers (if cook-on-way is on) still bank. Restocks rod from bank (or buys one from Harry if missing); buys up to 500 bait from Harry when bank bait is empty.'
+                'Sell Raw tuna / Raw swordfish to Harry at the Catherby fishing shop instead of banking, then return to harpoon fishing. Cooked leftovers (if cook-on-way is on) still bank. Restocks Harpoon from bank; buys one from Harry when bank has none.'
         }
     },
-    create: () => new CatherbyBaitFisher()
+    create: () => new CatherbySwordfish()
 });

@@ -1,15 +1,18 @@
-/**
- * LumbridgeGoblinKiller. Completely vibe coded by @.benzyme on Discord via Cursor AI
- * Self-contained ESM: pulls the live ABI from globalThis.__rs2b0t (same as @rs2b0t/api).
- */
+// Benzyme's Goblin Killer v2.6 — Lumbridge goblins → giant rats at combat 20, own-kill bone bury.
+// If oak camp is crowded (≥7 players), trains wider around HAM hideout door (goblins + spiders).
+// Auto-skips Tutorial Island (Accept character design → RuneScape Guide → Yes please).
+// Completely vibe coded by @.benzyme on Discord via Cursor AI
+// Self-contained ESM for rs2b0t Load local script / Load URL.
 const SUPPORTED_API_VERSION = 1;
 const abi = globalThis.__rs2b0t;
 if (!abi) {
-    throw new Error('LumbridgeGoblinKiller: globalThis.__rs2b0t missing — load this inside rs2b0t bot.html');
+    throw new Error(
+        "Benzyme's Goblin Killer: globalThis.__rs2b0t missing — load inside rs2b0t bot.html"
+    );
 }
 if (abi.apiVersion !== SUPPORTED_API_VERSION) {
     throw new Error(
-        `LumbridgeGoblinKiller: ABI ${abi.apiVersion} != supported ${SUPPORTED_API_VERSION}`
+        `Benzyme's Goblin Killer: ABI ${abi.apiVersion} != supported ${SUPPORTED_API_VERSION}`
     );
 }
 
@@ -20,6 +23,7 @@ const {
     LoopingBot,
     Npcs,
     Locs,
+    Players,
     GroundItems,
     Equipment,
     Inventory,
@@ -28,20 +32,65 @@ const {
     Traversal,
     Tile,
     Skills,
-    ChatDialog,
-    depositAllExcept
+    ChatDialog
 } = abi;
 
-const SCRIPT_NAME = 'LumbridgeGoblinKiller';
+const SCRIPT_NAME = "Benzyme's Goblin Killer";
+/** Display / paint version — bump minor on each update (v2 → v2.1 → v2.2 …). */
+const SCRIPT_VERSION = '2.6';
+const SCRIPT_VERSION_FULL = '2.6.0';
 
 /** Post-login welcome modal interface id (Close Window top-right). */
 const WELCOME_SCREEN_ID = 5993;
 
-/** Draynor bank stand — forced first walk for fresh combat-3 / total-28 accounts. */
-const DRAYNOR_BANK = new Tile(3092, 3244, 0);
-/** Fresh tutorial-complete account: combat 3, all skills 1 except HP 10 → total 28. */
-const FRESH_COMBAT_LEVEL = 3;
-const FRESH_TOTAL_LEVEL = 28;
+/** Tutorial Island map-square bbox (48,48 → tiles ~3072–3135). */
+const TUT_MIN = 3072;
+const TUT_MAX = 3200;
+const GUIDE_NAME = 'RuneScape Guide';
+
+/**
+ * Oak tree in the center of the Lumbridge goblin camp.
+ * Combat + bone loot stay inside this radius so cow-paddock bones to the north are ignored.
+ */
+const OAK_TREE = new Tile(3243, 3240, 0);
+const CAMP_RADIUS = 15;
+/** Goblin house door — keep Open whenever we're at the oak camp. */
+const HOUSE_DOOR = new Tile(3246, 3244, 0);
+
+/**
+ * Overflow training spot when the oak camp is crowded — HAM hideout door.
+ * Fight goblins + spiders here (prefer goblins); larger radius so we radiate around the door.
+ */
+const ALT_CAMP = new Tile(3176, 3243, 0);
+const ALT_CAMP_RADIUS = 28;
+/** If this many (or more) other players are at the oak camp, hop to ALT_CAMP. */
+const OAK_CROWD_THRESHOLD = 7;
+
+/**
+ * Combat-20+ training spot — Lumbridge giant rats (south of castle / near farm).
+ * Takes priority over oak + HAM overflow once combat level is reached.
+ */
+const RAT_CAMP = new Tile(3215, 3180, 0);
+const RAT_CAMP_RADIUS = 18;
+const RAT_COMBAT_LEVEL = 20;
+const RAT_NPC_NAME = 'Giant rat';
+
+/** Only loot Bones that appear on/near our last kill tile, within this window. */
+const OWN_BONE_LOOT_RADIUS = 2;
+const OWN_BONE_LOOT_MS = 12_000;
+
+const GEAR = ['Bronze sword', 'Wooden shield'];
+const DEATH_RE = /oh dear.*you are dead/i;
+const CANT_REACH_RE = /i can't reach that/i;
+const TOWARD_SLACK = 4;
+
+/** Side-panel tab indices (rs2b0t Game.openSideTab). */
+const STATS_TAB = 1;
+
+/** Melee styles that train a single combat skill. */
+const TRAINABLE = ['attack', 'strength', 'defence'];
+/** Skills we may show XP/hr for once they gain XP this session. */
+const COMBAT_TRACK = ['attack', 'strength', 'defence', 'hitpoints', 'prayer'];
 
 function welcomeHost() {
     return globalThis.rs2b0t ?? null;
@@ -74,7 +123,6 @@ function isWelcomeModalOpen() {
 
 /**
  * Always dismiss "Welcome to RuneScape" by clicking Close Window (top-right).
- * Retries until the modal is gone.
  * @returns {Promise<boolean>} true if we acted on / closed it
  */
 async function dismissWelcomeScreen() {
@@ -93,7 +141,6 @@ async function dismissWelcomeScreen() {
             break;
         }
 
-        // Prefer real Close Window (top-right BUTTON_CLOSE).
         let clicked = typeof actions.closeModal === 'function' && actions.closeModal();
 
         if (!clicked && typeof reader.closeButtonComId === 'function' && typeof actions.ifButton === 'function') {
@@ -123,38 +170,137 @@ async function dismissWelcomeScreen() {
     return !isWelcomeModalOpen();
 }
 
-/** Outdoor goblin camp — south of the house door (3246,3244). */
-const GOBLIN_SPOT = new Tile(3246, 3242, 0);
-const LEASH = 12;
-/** Only loot bones this far from camp (never chase cow-field bones). */
-const BONE_LEASH = 8;
-/** Goblin house door — keep this Open whenever we're at camp. */
-const HOUSE_DOOR = new Tile(3246, 3244, 0);
-const GEAR = ['Bronze sword', 'Wooden shield'];
-const DEATH_RE = /oh dear.*you are dead/i;
-const CANT_REACH_RE = /i can't reach that/i;
-const TOWARD_SLACK = 4;
+/** True while standing on Tutorial Island (map square ~48,48). */
+function isOnTutorialIsland(tile = Game.tile()) {
+    if (!tile) {
+        return false;
+    }
+    return (
+        tile.x >= TUT_MIN &&
+        tile.x < TUT_MAX &&
+        tile.z >= TUT_MIN &&
+        tile.z < TUT_MAX
+    );
+}
 
-/** Side-panel tab indices (rs2b0t Game.openSideTab). */
-const STATS_TAB = 1;
+function characterCreationTexts() {
+    const host = welcomeHost();
+    if (!host?.reader || typeof host.reader.mainModalTexts !== 'function') {
+        return [];
+    }
+    return host.reader.mainModalTexts() ?? [];
+}
 
-/** Melee styles that train a single combat skill (1:1 with the skill name). */
-const TRAINABLE = ['attack', 'strength', 'defence'];
-/** Skills we may show XP/hr for once they gain XP this session. */
-const COMBAT_TRACK = ['attack', 'strength', 'defence', 'hitpoints', 'prayer'];
+/** Character design (player_kit) open — Accept to finish appearance. */
+function isCharacterCreationOpen() {
+    const host = welcomeHost();
+    if (!host?.reader) {
+        return false;
+    }
+    const { reader } = host;
+    const main = typeof reader.modals === 'function' ? reader.modals().main : -1;
+    if (main === -1) {
+        return false;
+    }
+
+    const texts = characterCreationTexts();
+    if (
+        texts.some(
+            t =>
+                /design your player/i.test(t) ||
+                /use the buttons below to design/i.test(t) ||
+                /welcome to runescape - use the buttons/i.test(t)
+        )
+    ) {
+        return true;
+    }
+
+    // On tutorial island with an Accept button on the main modal.
+    if (
+        isOnTutorialIsland() &&
+        typeof reader.buttonByText === 'function' &&
+        reader.buttonByText(main, 'Accept') !== -1
+    ) {
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Click Accept on character creation (player_kit clientcode 326).
+ * @returns {Promise<boolean>}
+ */
+async function acceptCharacterCreation() {
+    if (!isCharacterCreationOpen()) {
+        return false;
+    }
+    const host = welcomeHost();
+    if (!host?.reader || !host?.actions) {
+        return false;
+    }
+    const { reader, actions } = host;
+    const main = reader.modals().main;
+    if (main === -1 || typeof actions.ifButton !== 'function') {
+        return false;
+    }
+
+    if (typeof reader.buttonByText === 'function') {
+        const btn = reader.buttonByText(main, 'Accept');
+        if (btn !== -1 && actions.ifButton(btn)) {
+            await Execution.delayTicks(2);
+            return true;
+        }
+    }
+    return false;
+}
+
+function findRuneScapeGuide() {
+    return (
+        Npcs.query().name(GUIDE_NAME).nearest() ??
+        Npcs.query()
+            .where(n => /runescape\s*guide/i.test(n.name ?? ''))
+            .nearest() ??
+        null
+    );
+}
+
+function pickTutorialSkipOption(options) {
+    if (!options || options.length === 0) {
+        return null;
+    }
+    for (const prefer of [
+        /yes\s*please/i,
+        /skip\s*(the\s*)?tutorial/i,
+        /^yes\b/i
+    ]) {
+        const hit = options.find(o => prefer.test(o ?? ''));
+        if (hit) {
+            return hit;
+        }
+    }
+    return options[0] ?? null;
+}
 
 function cheb(a, b) {
     return Math.max(Math.abs(a.x - b.x), Math.abs(a.z - b.z));
 }
 
-function inGoblinCamp(tile, radius = LEASH) {
-    if (!tile) {
-        return false;
+/**
+ * Other players standing in/near the oak goblin camp.
+ * Used to decide when to hop to the overflow spot.
+ */
+function otherPlayersAtOakCamp(radius = CAMP_RADIUS) {
+    if (typeof Players?.query !== 'function') {
+        return 0;
     }
-    return Tile.from(tile).distanceTo(GOBLIN_SPOT) <= radius;
+    return Players.query()
+        .where(p => {
+            const pt = p.tile?.() ?? null;
+            return pt != null && Tile.from(pt).distanceTo(OAK_TREE) <= radius;
+        })
+        .count();
 }
 
-/** Prefer doors that lie toward the target (not behind us). */
 function towardDest(door, here, dest) {
     return cheb(door, dest) <= cheb(here, dest) + TOWARD_SLACK;
 }
@@ -187,6 +333,11 @@ function isSpiderNpc(n) {
     return (n.name ?? '').toLowerCase().includes('spider');
 }
 
+function isGiantRatNpc(n) {
+    const name = (n.name ?? '').toLowerCase();
+    return name.includes('giant rat') || name === 'giant rat';
+}
+
 function fmtXph(n) {
     if (n >= 100_000) {
         return `${(n / 1000).toFixed(0)}k`;
@@ -197,7 +348,6 @@ function fmtXph(n) {
     return String(Math.round(n));
 }
 
-/** Elapsed session time as H:MM:SS or M:SS. */
 function fmtElapsed(ms) {
     const totalSec = Math.max(0, Math.floor(ms / 1000));
     const h = Math.floor(totalSec / 3600);
@@ -209,18 +359,23 @@ function fmtElapsed(ms) {
     return `${m}:${String(s).padStart(2, '0')}`;
 }
 
-function pickLowestStyle() {
-    let best = TRAINABLE[0];
-    let bestLevel = Skills.level(best);
-    for (let i = 1; i < TRAINABLE.length; i++) {
-        const style = TRAINABLE[i];
-        const level = Skills.level(style);
-        if (level < bestLevel) {
-            best = style;
-            bestLevel = level;
-        }
+/** Clamp levels-before-swap to the scroll bar range 1–20. */
+function clampLevels(n) {
+    const v = Math.floor(Number(n));
+    if (!Number.isFinite(v)) {
+        return 1;
     }
-    return best;
+    return Math.min(20, Math.max(1, v));
+}
+
+/**
+ * Pick a random melee style. Prefer a different skill than `except` when possible.
+ * @param {string | null} [except]
+ */
+function pickRandomStyle(except = null) {
+    const pool = TRAINABLE.filter(s => s !== except);
+    const choices = pool.length > 0 ? pool : TRAINABLE.slice();
+    return choices[Math.floor(Math.random() * choices.length)];
 }
 
 /** Matches rs2b0t SettingsStore boxKey(`set:${name}:${key}`). */
@@ -278,30 +433,6 @@ function isPanelPaused() {
     return !!document.querySelector('.rs2b0t-value.rs2b0t-state-paused');
 }
 
-/** Skills present on this era's client (HP 10 + rest 1 ⇒ total 28). */
-const TOTAL_SKILL_NAMES = [
-    'attack',
-    'defence',
-    'strength',
-    'hitpoints',
-    'ranged',
-    'prayer',
-    'magic',
-    'cooking',
-    'woodcutting',
-    'fletching',
-    'fishing',
-    'firemaking',
-    'crafting',
-    'smithing',
-    'mining',
-    'herblore',
-    'agility',
-    'thieving',
-    'slayer',
-    'runecraft'
-];
-
 function clientReader() {
     return abi.reader ?? welcomeHost()?.reader ?? null;
 }
@@ -337,37 +468,6 @@ function combatLevel() {
     return combatLevelFromSkills();
 }
 
-/** Sum of the standard skill set (HP 10 + rest 1 ⇒ 28). Do not sum reader.skillCount —
- * extra skills push the total above 28 and wrongly skip the Draynor path. */
-function totalLevel() {
-    return TOTAL_SKILL_NAMES.reduce((sum, name) => sum + (Skills.level(name) || 0), 0);
-}
-
-/** Chebyshev distance to the Draynor bank stand. */
-function distToDraynor(here) {
-    if (!here) {
-        return Infinity;
-    }
-    return Math.max(Math.abs(here.x - DRAYNOR_BANK.x), Math.abs(here.z - DRAYNOR_BANK.z));
-}
-
-/** Deposit predicate: bank everything except Bronze sword / Wooden shield. */
-function depositExceptGear() {
-    if (typeof depositAllExcept === 'function') {
-        return depositAllExcept(GEAR);
-    }
-    const keep = new Set(GEAR.map(g => g.toLowerCase()));
-    return name => {
-        const n = (name ?? '').toLowerCase();
-        return n.length > 0 && !keep.has(n);
-    };
-}
-
-function isGearName(name) {
-    const n = (name ?? '').toLowerCase();
-    return GEAR.some(g => g.toLowerCase() === n);
-}
-
 /**
  * Host disables Edit parameters while running *or* paused. Re-enable while
  * paused so Combat prefs can be changed without stopping the script.
@@ -392,21 +492,19 @@ function unlockPausedPrefsUi() {
     }
 }
 
-class LumbridgeGoblinKiller extends LoopingBot {
+class BenzymeGoblinKiller extends LoopingBot {
     recovering = false;
     deaths = 0;
     attacks = 0;
     status = 'starting';
     /** False until we have banked everything and withdrawn/equipped GEAR once. */
     gearReady = false;
-    /**
-     * Latched once stats are readable: true = combat 3 / total 28 → Draynor first.
-     * @type {boolean | null}
-     */
-    freshStarter = null;
+    /** False until Tutorial Island / character creation is cleared (or never present). */
+    tutorialCleared = false;
 
-    autoLowest = true;
-    levelsBeforeSwap = 1;
+    /** When true: train one style for N levels, then randomly pick another. */
+    rotateStyles = true;
+    levelsBeforeSwap = 5;
     buryBones = true;
     desiredStyle = 'attack';
     fixedStyle = 'attack';
@@ -421,19 +519,26 @@ class LumbridgeGoblinKiller extends LoopingBot {
     styleRetryAt = 0;
     cantReach = false;
     buried = 0;
-    /** When the current attacker started hitting us with no retaliate click. */
     underAttackSince = 0;
     /** @type {number} */
     lastAttackerIndex = -1;
-    /** NPC index we last clicked Attack on (counts as fighting back). */
     retaliatingIndex = -1;
     retaliateClickedAt = 0;
+    /** NPC index we are / were fighting — used to claim own-kill bone drops. */
+    fightNpcIndex = -1;
+    /** @type {InstanceType<typeof Tile> | null} */
+    fightNpcTile = null;
+    /** @type {InstanceType<typeof Tile> | null} */
+    ownBoneLootTile = null;
+    ownBoneLootUntil = 0;
+    /** Inventory bones from our own loot that we are allowed to bury. */
+    ownBonesPending = 0;
+    /** When true: train at ALT_CAMP (goblins + spiders) because oak is crowded. */
+    useAltCamp = false;
+    /** When true: combat ≥20 — train giant rats at RAT_CAMP (overrides goblin camps). */
+    useRats = false;
     /** @type {ReturnType<typeof setInterval> | null} */
     unlockTimer = null;
-
-    grindTargets() {
-        return ['goblin'];
-    }
 
     async onStart() {
         await Execution.delayUntil(() => Game.ingame() && Game.tile() !== null, 0);
@@ -441,11 +546,13 @@ class LumbridgeGoblinKiller extends LoopingBot {
         this.startPausedPrefUnlock();
 
         this.syncPrefs({ silent: true });
-        if (this.autoLowest) {
-            this.desiredStyle = pickLowestStyle();
+        if (this.rotateStyles) {
+            this.desiredStyle = pickRandomStyle(null);
         } else {
             this.desiredStyle = this.fixedStyle;
         }
+        this.useAltCamp = false;
+        this.useRats = false;
         this.styleLevelAnchor = Skills.level(this.desiredStyle);
 
         this.startedAt = Date.now();
@@ -453,11 +560,16 @@ class LumbridgeGoblinKiller extends LoopingBot {
         this.usedSkills = new Set();
         this.buried = 0;
         this.gearReady = false;
-        this.freshStarter = null;
+        this.tutorialCleared = false;
         this.underAttackSince = 0;
         this.lastAttackerIndex = -1;
         this.retaliatingIndex = -1;
         this.retaliateClickedAt = 0;
+        this.fightNpcIndex = -1;
+        this.fightNpcTile = null;
+        this.ownBoneLootTile = null;
+        this.ownBoneLootUntil = 0;
+        this.ownBonesPending = 0;
         for (const skill of COMBAT_TRACK) {
             this.xpAtStart[skill] = Skills.xp(skill);
         }
@@ -487,52 +599,28 @@ class LumbridgeGoblinKiller extends LoopingBot {
         });
 
         this.log(
-            this.autoLowest
-                ? `started — auto-lowest on (swap every ${this.levelsBeforeSwap} lvl); training ${this.desiredStyle}`
+            this.rotateStyles
+                ? `started — rotate styles (swap every ${this.levelsBeforeSwap} lvl); training ${this.desiredStyle}`
                 : `started — fixed style ${this.desiredStyle}`
         );
-        this.log(`bury bones: ${this.buryBones ? 'on' : 'off'}`);
-
-        await Execution.delayUntil(() => Skills.level('hitpoints') > 0, 5000);
-        this.latchFreshStarter();
         this.log(
-            `startup: one trip to Draynor ${DRAYNOR_BANK.x},${DRAYNOR_BANK.z},0 → gear up → goblins until death`
+            `camp oak ${OAK_TREE.x},${OAK_TREE.z} · radius ${CAMP_RADIUS} · ` +
+                `if ≥${OAK_CROWD_THRESHOLD} players → alt HAM door ${ALT_CAMP.x},${ALT_CAMP.z} ` +
+                `r${ALT_CAMP_RADIUS} (goblins+spiders) · ` +
+                `combat ≥${RAT_COMBAT_LEVEL} → rats ${RAT_CAMP.x},${RAT_CAMP.z} · ` +
+                `bury bones: ${this.buryBones ? 'own kills only' : 'off'}`
         );
-        this.log('tip: Pause → Edit parameters to change prefs without stopping');
-        this.status = 'walk to Draynor';
-    }
-
-    /** Detect combat 3 + total 28 once (also combat-3 base melee if total math differs). */
-    latchFreshStarter() {
-        if (this.freshStarter !== null) {
-            return this.freshStarter;
-        }
-        if (Skills.level('hitpoints') <= 0) {
-            return null;
-        }
-        const combat = combatLevel();
-        const total = totalLevel();
-        const baseMelee =
-            Skills.level('hitpoints') === 10 &&
-            Skills.level('attack') === 1 &&
-            Skills.level('strength') === 1 &&
-            Skills.level('defence') === 1;
-        this.freshStarter =
-            combat === FRESH_COMBAT_LEVEL &&
-            (total === FRESH_TOTAL_LEVEL || baseMelee);
-        if (this.freshStarter) {
-            this.log(
-                `fresh starter (combat ${combat}, total ${total}) — ` +
-                    `first action: walk to ${DRAYNOR_BANK.x},${DRAYNOR_BANK.z},0 then bank junk except sword+shield`
-            );
-            this.status = 'walk to Draynor';
+        this.log(
+            'startup first: skip Tutorial Island if needed → find bank → unequip all → deposit all → withdraw Bronze sword + Wooden shield'
+        );
+        if (isOnTutorialIsland() || isCharacterCreationOpen() || findRuneScapeGuide()) {
+            this.log('Tutorial Island / character creation detected — will Accept → Guide → skip');
+            this.status = 'tutorial';
         } else {
-            this.log(
-                `stats combat ${combat}, total ${total} — first walk ${DRAYNOR_BANK.x},${DRAYNOR_BANK.z},0 then bank all / withdraw GEAR`
-            );
-            this.status = 'walk to Draynor';
+            this.tutorialCleared = true;
+            this.status = 'find bank';
         }
-        return this.freshStarter;
+        this.log('tip: Pause → Edit parameters to change prefs without stopping');
     }
 
     onPause() {
@@ -541,6 +629,106 @@ class LumbridgeGoblinKiller extends LoopingBot {
 
     onResume() {
         this.syncPrefs({ silent: false });
+    }
+
+    /**
+     * Tutorial Island / character creation:
+     * 1) Click Accept on player design
+     * 2) Talk to RuneScape Guide
+     * 3) Choose "Yes please." to skip (dev/private servers)
+     * Then mark cleared and let normal bank/gear flow run.
+     * @returns {Promise<boolean>} true if this loop spent time on tutorial
+     */
+    async handleTutorialIsland() {
+        // Already off the island with no design UI — commence normal script.
+        if (
+            !isCharacterCreationOpen() &&
+            !isOnTutorialIsland() &&
+            !findRuneScapeGuide() &&
+            !(
+                typeof ChatDialog !== 'undefined' &&
+                ChatDialog &&
+                (ChatDialog.canContinue() ||
+                    (typeof ChatDialog.isOpen === 'function' && ChatDialog.isOpen()))
+            )
+        ) {
+            this.tutorialCleared = true;
+            this.log('tutorial cleared — commencing normal script');
+            this.status = 'find bank';
+            return false;
+        }
+
+        if (isCharacterCreationOpen()) {
+            this.status = 'tutorial: accept design';
+            this.log('character creation — clicking Accept');
+            if (await acceptCharacterCreation()) {
+                this.log('accepted character design');
+            } else {
+                this.log('could not click Accept — retrying');
+                await Execution.delayTicks(2);
+            }
+            return true;
+        }
+
+        if (typeof ChatDialog !== 'undefined' && ChatDialog) {
+            if (ChatDialog.canContinue()) {
+                this.status = 'tutorial: continue';
+                await ChatDialog.continue();
+                return true;
+            }
+            if (
+                typeof ChatDialog.isOpen === 'function' &&
+                ChatDialog.isOpen() &&
+                typeof ChatDialog.options === 'function' &&
+                ChatDialog.options().length > 0 &&
+                typeof ChatDialog.chooseOption === 'function'
+            ) {
+                const opts = ChatDialog.options();
+                const pick = pickTutorialSkipOption(opts);
+                this.status = 'tutorial: skip option';
+                this.log(
+                    `tutorial dialog: [${opts.join(' | ')}] → ${pick ?? 'none'}`
+                );
+                if (pick) {
+                    await ChatDialog.chooseOption(pick);
+                } else {
+                    await ChatDialog.chooseOption();
+                }
+                await Execution.delayTicks(2);
+                return true;
+            }
+        }
+
+        if (isOnTutorialIsland() || findRuneScapeGuide()) {
+            const guide = findRuneScapeGuide();
+            if (!guide) {
+                this.status = 'tutorial: find guide';
+                this.log('waiting for RuneScape Guide');
+                await Execution.delayTicks(3);
+                return true;
+            }
+
+            const talk =
+                guide.actions().find(a => /talk/i.test(a ?? '')) ?? 'Talk-to';
+            this.status = 'tutorial: talk to guide';
+            this.log(`Talk-to ${GUIDE_NAME} — skip tutorial`);
+            await guide.interact(talk);
+            await Execution.delayUntil(
+                () =>
+                    (typeof ChatDialog !== 'undefined' &&
+                        ChatDialog &&
+                        (ChatDialog.canContinue() ||
+                            (typeof ChatDialog.isOpen === 'function' &&
+                                ChatDialog.isOpen()))) ||
+                    !isOnTutorialIsland(),
+                8000
+            );
+            return true;
+        }
+
+        // Fallback: something odd — wait then re-check.
+        await Execution.delayTicks(2);
+        return true;
     }
 
     async loop() {
@@ -555,12 +743,25 @@ class LumbridgeGoblinKiller extends LoopingBot {
             return;
         }
 
+        // Fresh accounts: character design → RuneScape Guide → skip tutorial → Lumbridge.
+        if (!this.tutorialCleared) {
+            if (await this.handleTutorialIsland()) {
+                return;
+            }
+        }
+
         if (this.recovering) {
             await this.recover();
             return;
         }
 
-        // Clear leftover random-event / dwarf dialog before combat clicks.
+        // First priority after login/respawn gear loss: find a bank and kit up.
+        if (!this.gearReady) {
+            if (await this.prepCombatGear()) {
+                return;
+            }
+        }
+
         if (typeof ChatDialog !== 'undefined' && ChatDialog) {
             if (ChatDialog.canContinue()) {
                 this.status = 'continue dialog';
@@ -580,7 +781,6 @@ class LumbridgeGoblinKiller extends LoopingBot {
             }
         }
 
-        // Drop Beer / Kebab / Casket — never eat or drink them.
         if (await this.handleDropJunk()) {
             return;
         }
@@ -593,10 +793,11 @@ class LumbridgeGoblinKiller extends LoopingBot {
             return;
         }
 
-        // Keep Stats open by default (combat-style clicks leave the combat tab).
         if (await this.ensureStatsTab()) {
             return;
         }
+
+        this.refreshOwnKillLoot();
 
         if (await this.handleBones()) {
             return;
@@ -608,52 +809,83 @@ class LumbridgeGoblinKiller extends LoopingBot {
             return;
         }
 
-        // Being hit without fighting back for 5s → click Attack on that NPC.
         if (await this.ensureRetaliate()) {
             return;
         }
 
-        if (Tile.from(here).distanceTo(GOBLIN_SPOT) > LEASH) {
-            this.status = 'walking to goblins';
-            this.log('walking to goblins');
-            const ok = await Traversal.walkResilient(GOBLIN_SPOT, {
+        this.refreshCampChoice();
+        const anchor = this.campAnchor();
+        const radius = this.campRadius();
+
+        if (Tile.from(here).distanceTo(anchor) > radius) {
+            this.status = this.useRats
+                ? 'walking to rats'
+                : this.useAltCamp
+                  ? 'walking to alt camp'
+                  : 'walking to goblins';
+            this.log(
+                this.useRats
+                    ? `walking to giant rats ${anchor.x},${anchor.z}`
+                    : this.useAltCamp
+                      ? `walking to overflow camp ${anchor.x},${anchor.z}`
+                      : `walking to goblin camp oak ${anchor.x},${anchor.z}`
+            );
+            const ok = await Traversal.walkResilient(anchor, {
                 radius: 4,
                 log: msg => this.log(`  ${msg}`)
             });
             if (!ok) {
-                this.log('path to goblins failed — retrying');
+                this.log('path to camp failed — retrying');
             }
             return;
         }
 
-        // Keep the house door open whenever we're at camp (even mid-fight).
-        if (await this.ensureHouseDoorOpen()) {
+        // Re-check progression / crowd once we arrive (scene may have loaded more).
+        if (!this.useRats) {
+            this.refreshCampChoice();
+            if (this.useRats || this.useAltCamp) {
+                return;
+            }
+        }
+
+        if (!this.useRats && !this.useAltCamp && (await this.ensureHouseDoorOpen())) {
             return;
         }
 
-        // Only idle in combat when a goblin is actually on us. After random events
-        // (Drunken Dwarf, etc.) the combat flag can linger / drop without a target —
-        // fall through and Attack again.
         if (Game.inCombat()) {
-            const onMe = this.findGoblinFightingMe();
+            const onMe = this.findTargetFightingMe();
             if (onMe) {
+                this.noteFightTarget(onMe);
                 this.status = 'in combat';
                 await Execution.delayTicks(2);
                 return;
             }
             this.status = 're-engaging';
-            this.log('combat interrupted (e.g. random event) — re-engaging a goblin');
+            this.log('combat interrupted (e.g. random event) — re-engaging');
         }
 
-        const goblin = this.findAttackableGoblin();
-        if (!goblin) {
-            this.status = 'waiting for goblin';
-            await Traversal.walkTo(GOBLIN_SPOT, { radius: 2, timeoutMs: 8_000 });
+        const target = this.findAttackableTarget();
+        if (!target) {
+            this.status = this.useRats
+                ? 'waiting for giant rat'
+                : this.useAltCamp
+                  ? 'waiting for goblin/spider'
+                  : 'waiting for goblin';
+            // At HAM door / rats, roam farther so we radiate through the area.
+            const idleRadius = this.useRats
+                ? Math.min(8, Math.floor(RAT_CAMP_RADIUS / 2))
+                : this.useAltCamp
+                  ? Math.min(10, Math.floor(ALT_CAMP_RADIUS / 2))
+                  : 2;
+            await Traversal.walkTo(anchor, {
+                radius: idleRadius,
+                timeoutMs: 8_000
+            });
             await Execution.delayTicks(2);
             return;
         }
 
-        await this.attackGoblin(goblin);
+        await this.attackTarget(target);
     }
 
     onStop() {
@@ -668,19 +900,32 @@ class LumbridgeGoblinKiller extends LoopingBot {
     onPaint(ctx) {
         const elapsed = Date.now() - this.startedAt;
         const lines = [
-            `Benzyme's Goblin Killer v1.10`,
+            `Benzyme's Goblin Killer v${SCRIPT_VERSION}`,
             `time ${fmtElapsed(elapsed)}  ·  ${this.status}`,
             `deaths ${this.deaths}`
         ];
 
         if (this.buryBones) {
-            lines.push(`bury bones · buried ${this.buried}`);
+            lines.push(
+                `bury own bones · buried ${this.buried}` +
+                    (this.ownBonesPending > 0 ? ` · pending ${this.ownBonesPending}` : '')
+            );
         }
 
-        if (this.autoLowest) {
+        if (this.useRats) {
+            lines.push(`camp rats ${RAT_CAMP.x},${RAT_CAMP.z} r${RAT_CAMP_RADIUS} · combat ≥${RAT_COMBAT_LEVEL}`);
+        } else if (this.useAltCamp) {
+            lines.push(
+                `camp HAM door ${ALT_CAMP.x},${ALT_CAMP.z} r${ALT_CAMP_RADIUS} · goblins > spiders`
+            );
+        } else {
+            lines.push(`camp oak ${OAK_TREE.x},${OAK_TREE.z}`);
+        }
+
+        if (this.rotateStyles) {
             const gained = Skills.level(this.desiredStyle) - this.styleLevelAnchor;
             lines.push(
-                `auto-lowest · ${gained}/${this.levelsBeforeSwap} lv on ${this.desiredStyle}`
+                `rotate · ${gained}/${this.levelsBeforeSwap} lv on ${this.desiredStyle}`
             );
         }
 
@@ -696,7 +941,7 @@ class LumbridgeGoblinKiller extends LoopingBot {
             lines.push(`${skill}: ${fmtXph(xph)} xp/hr  (+${Math.round(gained)} xp)`);
         }
 
-        lines.push('CAUTION: ONLY DETECTS BRONZE SWORD AND WOODEN SHIELD.');
+        lines.push('GEAR: Bronze sword + Wooden shield only.');
 
         ctx.font = '12px monospace';
         let maxW = 0;
@@ -721,16 +966,15 @@ class LumbridgeGoblinKiller extends LoopingBot {
      */
     syncPrefs(opts = {}) {
         const silent = opts.silent === true;
-        const prevAuto = this.autoLowest;
+        const prevRotate = this.rotateStyles;
         const prevLevels = this.levelsBeforeSwap;
         const prevFixed = this.fixedStyle;
         const prevBury = this.buryBones;
 
-        this.autoLowest = readPrefBool('autoLowest', this.settings.bool('autoLowest', true));
+        this.rotateStyles = readPrefBool('rotateStyles', this.settings.bool('rotateStyles', true));
         this.buryBones = readPrefBool('buryBones', this.settings.bool('buryBones', true));
-        this.levelsBeforeSwap = Math.max(
-            1,
-            Math.floor(readPrefNum('levelsBeforeSwap', this.settings.num('levelsBeforeSwap', 1)))
+        this.levelsBeforeSwap = clampLevels(
+            readPrefNum('levelsBeforeSwap', this.settings.num('levelsBeforeSwap', 5))
         );
         let fixed = readPrefStr('meleeStyle', this.settings.str('meleeStyle', 'attack')).toLowerCase();
         if (!TRAINABLE.includes(fixed)) {
@@ -742,24 +986,24 @@ class LumbridgeGoblinKiller extends LoopingBot {
             this.log(`prefs: bury bones → ${this.buryBones ? 'on' : 'off'}`);
         }
 
-        if (this.autoLowest !== prevAuto) {
-            if (this.autoLowest) {
-                this.desiredStyle = pickLowestStyle();
+        if (this.rotateStyles !== prevRotate) {
+            if (this.rotateStyles) {
+                this.desiredStyle = pickRandomStyle(null);
                 this.styleLevelAnchor = Skills.level(this.desiredStyle);
                 if (!silent) {
-                    this.log(`prefs: auto-lowest ON → training ${this.desiredStyle}`);
+                    this.log(`prefs: rotate styles ON → training ${this.desiredStyle}`);
                 }
             } else {
                 this.desiredStyle = this.fixedStyle;
                 this.styleLevelAnchor = Skills.level(this.desiredStyle);
                 if (!silent) {
-                    this.log(`prefs: auto-lowest OFF → fixed ${this.desiredStyle}`);
+                    this.log(`prefs: rotate styles OFF → fixed ${this.desiredStyle}`);
                 }
             }
             return;
         }
 
-        if (!this.autoLowest && this.fixedStyle !== prevFixed) {
+        if (!this.rotateStyles && this.fixedStyle !== prevFixed) {
             this.desiredStyle = this.fixedStyle;
             this.styleLevelAnchor = Skills.level(this.desiredStyle);
             if (!silent) {
@@ -769,28 +1013,80 @@ class LumbridgeGoblinKiller extends LoopingBot {
         }
 
         if (this.levelsBeforeSwap !== prevLevels && !silent) {
-            this.log(`prefs: levels before swap → ${this.levelsBeforeSwap}`);
+            this.log(`prefs: levels before random swap → ${this.levelsBeforeSwap}`);
         }
     }
 
-    /**
-     * Attack a goblin. On "I can't reach that!" open the blocking door and retry.
-     */
-    async attackGoblin(goblin) {
-        const index = goblin.index;
-        const targetTile = goblin.tile();
+    campAnchor() {
+        if (this.useRats) {
+            return RAT_CAMP;
+        }
+        return this.useAltCamp ? ALT_CAMP : OAK_TREE;
+    }
 
-        this.status = `attacking (${goblin.distance()}t)`;
-        this.log(`attacking Goblin @ ${targetTile.x},${targetTile.z}`);
+    campRadius() {
+        if (this.useRats) {
+            return RAT_CAMP_RADIUS;
+        }
+        return this.useAltCamp ? ALT_CAMP_RADIUS : CAMP_RADIUS;
+    }
+
+    inActiveCamp(tile, radius = this.campRadius()) {
+        if (!tile) {
+            return false;
+        }
+        return Tile.from(tile).distanceTo(this.campAnchor()) <= radius;
+    }
+
+    /**
+     * Combat ≥20 → giant rats (latched). Else if oak is crowded → HAM overflow.
+     * Rat camp overrides goblin / spider spots for the rest of the run.
+     */
+    refreshCampChoice() {
+        if (!this.useRats) {
+            const combat = combatLevel();
+            if (combat >= RAT_COMBAT_LEVEL) {
+                this.useRats = true;
+                this.useAltCamp = false;
+                this.log(
+                    `combat ${combat} ≥ ${RAT_COMBAT_LEVEL} — moving to giant rats ` +
+                        `${RAT_CAMP.x},${RAT_CAMP.z},${RAT_CAMP.level ?? 0}`
+                );
+                return;
+            }
+        }
+        if (this.useRats || this.useAltCamp) {
+            return;
+        }
+        const crowd = otherPlayersAtOakCamp(CAMP_RADIUS);
+        if (crowd >= OAK_CROWD_THRESHOLD) {
+            this.useAltCamp = true;
+            this.log(
+                `oak camp crowded (${crowd} players ≥ ${OAK_CROWD_THRESHOLD}) — ` +
+                    `training at ${ALT_CAMP.x},${ALT_CAMP.z} (goblins preferred, spiders ok)`
+            );
+        }
+    }
+
+    async attackTarget(npc) {
+        const index = npc.index;
+        const targetTile = npc.tile();
+        const name = npc.name ?? 'NPC';
+
+        this.status = `attacking ${name} (${npc.distance()}t)`;
+        this.log(`attacking ${name} @ ${targetTile.x},${targetTile.z}`);
         this.cantReach = false;
-        await goblin.interact('Attack');
-        this.noteRetaliateClick(goblin.index);
+        this.noteFightTarget(npc);
+        await npc.interact('Attack');
+        this.noteRetaliateClick(npc.index);
         await Execution.delayUntil(
-            () => Game.inCombat() || this.cantReach || this.findGoblinFightingMe() !== null,
+            () => Game.inCombat() || this.cantReach || this.findTargetFightingMe() !== null,
             4000
         );
 
-        if (Game.inCombat() || this.findGoblinFightingMe()) {
+        if (Game.inCombat() || this.findTargetFightingMe()) {
+            const fighting = this.findTargetFightingMe() ?? npc;
+            this.noteFightTarget(fighting);
             this.attacks++;
             return;
         }
@@ -803,35 +1099,80 @@ class LumbridgeGoblinKiller extends LoopingBot {
         this.status = 'opening door';
         const opened = await this.openDoorToward(targetTile);
         if (!opened) {
-            this.log('no shut door found toward that goblin');
+            this.log(`no shut door found toward that ${name}`);
             return;
         }
 
         const again =
             Npcs.query()
                 .where(n => n.index === index)
-                .nearest() ?? this.findAttackableGoblin();
+                .nearest() ?? this.findAttackableTarget();
 
         if (!again) {
-            this.log('goblin gone after opening door');
+            // Target gone after door open — likely died / despawned; claim bone tile if we had one.
+            this.refreshOwnKillLoot();
+            this.log(`${name} gone after opening door`);
             return;
         }
 
         this.status = `retry attack (${again.distance()}t)`;
-        this.log(`retrying Goblin @ ${again.tile().x},${again.tile().z}`);
+        this.log(`retrying ${again.name ?? name} @ ${again.tile().x},${again.tile().z}`);
         this.cantReach = false;
+        this.noteFightTarget(again);
         await again.interact('Attack');
         this.noteRetaliateClick(again.index);
         if (
             await Execution.delayUntil(
-                () => Game.inCombat() || this.cantReach || this.findGoblinFightingMe() !== null,
+                () => Game.inCombat() || this.cantReach || this.findTargetFightingMe() !== null,
                 4000
             )
         ) {
-            if (Game.inCombat() || this.findGoblinFightingMe()) {
+            if (Game.inCombat() || this.findTargetFightingMe()) {
+                const fighting = this.findTargetFightingMe() ?? again;
+                this.noteFightTarget(fighting);
                 this.attacks++;
             }
         }
+    }
+
+    noteFightTarget(npc) {
+        if (!npc) {
+            return;
+        }
+        this.fightNpcIndex = npc.index;
+        const t = npc.tile?.() ?? null;
+        if (t) {
+            this.fightNpcTile = Tile.from(t);
+        }
+    }
+
+    /**
+     * When the NPC we were fighting despawns, treat last tile as our kill drop spot
+     * so we only loot / bury those bones — never random camp piles.
+     */
+    refreshOwnKillLoot() {
+        if (this.fightNpcIndex < 0) {
+            return;
+        }
+        const still = Npcs.query()
+            .where(n => n.index === this.fightNpcIndex)
+            .nearest();
+        if (still) {
+            const t = still.tile?.() ?? null;
+            if (t) {
+                this.fightNpcTile = Tile.from(t);
+            }
+            return;
+        }
+        if (this.fightNpcTile) {
+            this.ownBoneLootTile = this.fightNpcTile;
+            this.ownBoneLootUntil = Date.now() + OWN_BONE_LOOT_MS;
+            this.log(
+                `own kill @ ${this.ownBoneLootTile.x},${this.ownBoneLootTile.z} — loot bones only there`
+            );
+        }
+        this.fightNpcIndex = -1;
+        this.fightNpcTile = null;
     }
 
     noteRetaliateClick(index) {
@@ -841,13 +1182,8 @@ class LumbridgeGoblinKiller extends LoopingBot {
         this.lastAttackerIndex = index;
     }
 
-    /**
-     * Goblin / spider / any Attackable NPC on us.
-     * Uses targetsMe, plus sticky in-combat (faceEntity flickers between hits) —
-     * spiders near the house often need the sticky check.
-     */
     findNpcAttackingMe() {
-        const range = LEASH + 12;
+        const range = this.campRadius() + 12;
         const targeting = Npcs.query()
             .within(range)
             .where(n => hasAttackOp(n))
@@ -857,8 +1193,6 @@ class LumbridgeGoblinKiller extends LoopingBot {
             return targeting;
         }
 
-        // faceEntity often clears between hits — keep spiders/goblins that are
-        // mid-fight in our face and not clearly on someone else.
         const sticky = Npcs.query()
             .within(4)
             .where(n => hasAttackOp(n))
@@ -868,7 +1202,6 @@ class LumbridgeGoblinKiller extends LoopingBot {
             return sticky;
         }
 
-        // Explicit spider scan a bit further (multi-combat packs).
         return (
             Npcs.query()
                 .within(range)
@@ -879,11 +1212,6 @@ class LumbridgeGoblinKiller extends LoopingBot {
         );
     }
 
-    /**
-     * If an NPC (goblin, spider, etc.) has been attacking us for 5s without us
-     * clicking Attack back, click Attack on them.
-     * @returns {Promise<boolean>} true if this loop spent time retaliating
-     */
     async ensureRetaliate() {
         const attacker = this.findNpcAttackingMe();
         if (!attacker) {
@@ -892,7 +1220,6 @@ class LumbridgeGoblinKiller extends LoopingBot {
             return false;
         }
 
-        // We already clicked Attack on this NPC recently — treat as fighting back.
         if (
             attacker.index === this.retaliatingIndex &&
             Date.now() - this.retaliateClickedAt < 12_000
@@ -920,6 +1247,7 @@ class LumbridgeGoblinKiller extends LoopingBot {
         );
         this.cantReach = false;
         await attacker.interact('Attack');
+        this.noteFightTarget(attacker);
         this.noteRetaliateClick(attacker.index);
         await Execution.delayUntil(
             () => Game.animating() || Game.inCombat() || this.cantReach,
@@ -929,36 +1257,114 @@ class LumbridgeGoblinKiller extends LoopingBot {
         return true;
     }
 
-    /** Goblin currently targeting the player (real fight, not a stale combat flag). */
-    findGoblinFightingMe() {
-        return Npcs.query()
+    findTargetFightingMe() {
+        const r = this.campRadius();
+        if (this.useRats) {
+            return (
+                Npcs.query()
+                    .name(RAT_NPC_NAME)
+                    .within(r + 6)
+                    .where(n => this.inActiveCamp(n.tile(), r + 2))
+                    .where(n => npcTargetsMe(n))
+                    .nearest() ??
+                Npcs.query()
+                    .within(r + 6)
+                    .where(n => isGiantRatNpc(n))
+                    .where(n => this.inActiveCamp(n.tile(), r + 2))
+                    .where(n => npcTargetsMe(n))
+                    .nearest() ??
+                null
+            );
+        }
+        const goblin = Npcs.query()
             .name('Goblin')
-            .within(LEASH + 6)
-            .where(n => inGoblinCamp(n.tile(), LEASH + 2))
+            .within(r + 6)
+            .where(n => this.inActiveCamp(n.tile(), r + 2))
             .where(n => npcTargetsMe(n))
             .nearest();
+        if (goblin) {
+            return goblin;
+        }
+        if (!this.useAltCamp) {
+            return null;
+        }
+        return (
+            Npcs.query()
+                .within(r + 6)
+                .where(n => isSpiderNpc(n))
+                .where(n => this.inActiveCamp(n.tile(), r + 2))
+                .where(n => npcTargetsMe(n))
+                .nearest() ?? null
+        );
     }
 
     /**
-     * Prefer the goblin already on us (re-engage after random events), else an idle one.
-     * Never start a fight on a goblin already in combat with someone else.
-     * Stay inside the goblin camp — do not chase into the cow field.
+     * Prefer target already on us, else idle NPC in camp.
+     * Rats at combat 20+; else goblins; at HAM overflow fall back to spiders.
      */
-    findAttackableGoblin() {
-        const onMe = this.findGoblinFightingMe();
+    findAttackableTarget() {
+        const onMe = this.findTargetFightingMe();
         if (onMe) {
             return onMe;
         }
-        return Npcs.query()
+
+        const r = this.campRadius();
+        if (this.useRats) {
+            return (
+                Npcs.query()
+                    .name(RAT_NPC_NAME)
+                    .action('Attack')
+                    .within(r + 4)
+                    .where(n => this.inActiveCamp(n.tile()))
+                    .where(n => !n.inCombat)
+                    .nearest() ??
+                Npcs.query()
+                    .action('Attack')
+                    .within(r + 4)
+                    .where(n => isGiantRatNpc(n))
+                    .where(n => this.inActiveCamp(n.tile()))
+                    .where(n => !n.inCombat)
+                    .nearest() ??
+                null
+            );
+        }
+
+        const goblin = Npcs.query()
             .name('Goblin')
             .action('Attack')
-            .within(LEASH + 4)
-            .where(n => inGoblinCamp(n.tile()))
+            .within(r + 4)
+            .where(n => this.inActiveCamp(n.tile()))
             .where(n => !n.inCombat)
             .nearest();
+        if (goblin) {
+            return goblin;
+        }
+
+        if (!this.useAltCamp) {
+            return null;
+        }
+
+        return (
+            Npcs.query()
+                .action('Attack')
+                .within(r + 4)
+                .where(n => isSpiderNpc(n))
+                .where(n => this.inActiveCamp(n.tile()))
+                .where(n => !n.inCombat)
+                .nearest() ?? null
+        );
     }
 
-    /** Shut Door loc at the goblin house entrance, if any. */
+    /** @deprecated use findTargetFightingMe */
+    findGoblinFightingMe() {
+        return this.findTargetFightingMe();
+    }
+
+    /** @deprecated use findAttackableTarget */
+    findAttackableGoblin() {
+        return this.findAttackableTarget();
+    }
+
     findShutHouseDoor() {
         return (
             Locs.query()
@@ -976,10 +1382,6 @@ class LumbridgeGoblinKiller extends LoopingBot {
         );
     }
 
-    /**
-     * If the house door is shut while we're at camp, open it.
-     * @returns {Promise<boolean>} true if this loop spent time on the door
-     */
     async ensureHouseDoorOpen() {
         const shut = this.findShutHouseDoor();
         if (!shut) {
@@ -1006,7 +1408,6 @@ class LumbridgeGoblinKiller extends LoopingBot {
         );
     }
 
-    /** Open the nearest shut door toward `toward`. */
     async openDoorToward(toward, knownDoor = null) {
         const here = Game.tile();
         if (!here) {
@@ -1049,10 +1450,6 @@ class LumbridgeGoblinKiller extends LoopingBot {
         }, 5000);
     }
 
-    /**
-     * Drop Beer, Kebab, and any Casket from the pack (never Drink/Eat).
-     * @returns {Promise<boolean>} true if this loop dropped something
-     */
     async handleDropJunk() {
         const item =
             Inventory.items().find(i => {
@@ -1063,7 +1460,6 @@ class LumbridgeGoblinKiller extends LoopingBot {
                 if (n === 'kebab' || n === 'casket' || n.includes('casket')) {
                     return true;
                 }
-                // Plain Beer / dwarf beer — not kegs or other drinks.
                 return n === 'beer' || (n.includes('beer') && !n.includes('keg'));
             }) ?? null;
 
@@ -1080,10 +1476,6 @@ class LumbridgeGoblinKiller extends LoopingBot {
         return true;
     }
 
-    /**
-     * Keep the Stats side tab open whenever nothing else needs another tab.
-     * @returns {Promise<boolean>} true if this loop spent time opening Stats
-     */
     async ensureStatsTab() {
         if (typeof Game.openSideTab !== 'function') {
             return false;
@@ -1103,9 +1495,8 @@ class LumbridgeGoblinKiller extends LoopingBot {
     }
 
     /**
-     * Bury inventory bones / loot nearby bones when the option is on.
-     * Ground bones must sit inside the goblin camp — never chase cow-field piles.
-     * @returns {Promise<boolean>} true if this loop handled bones
+     * Bury inventory bones from our own kills only.
+     * Ground loot is limited to the last kill tile window — never scoop other players' piles.
      */
     async handleBones() {
         if (!this.buryBones || Game.inCombat()) {
@@ -1114,12 +1505,22 @@ class LumbridgeGoblinKiller extends LoopingBot {
 
         const bones = Inventory.first('Bones');
         if (bones) {
-            this.status = 'burying bones';
+            if (this.ownBonesPending <= 0) {
+                // Foreign / leftover bones — drop instead of burying Prayer XP we didn't earn.
+                this.status = 'drop foreign bones';
+                this.log('dropping bones not from our kill');
+                const before = Inventory.used();
+                await bones.interact('Drop');
+                await Execution.delayUntil(() => Inventory.used() < before, 4000);
+                return true;
+            }
+            this.status = 'burying own bones';
             const before = Inventory.used();
             await bones.interact('Bury');
             if (await Execution.delayUntil(() => Inventory.used() < before, 3000)) {
+                this.ownBonesPending = Math.max(0, this.ownBonesPending - 1);
                 this.buried++;
-                this.log(`buried bones (#${this.buried})`);
+                this.log(`buried own bones (#${this.buried})`);
             }
             return true;
         }
@@ -1128,20 +1529,32 @@ class LumbridgeGoblinKiller extends LoopingBot {
             return false;
         }
 
-        // Only loot bones that are inside the goblin camp radius.
+        if (!this.ownBoneLootTile || Date.now() > this.ownBoneLootUntil) {
+            return false;
+        }
+
+        const spot = this.ownBoneLootTile;
         const ground = GroundItems.query()
             .name('Bones')
-            .within(BONE_LEASH + 2)
-            .where(g => inGoblinCamp(g.tile(), BONE_LEASH))
+            .within(OWN_BONE_LOOT_RADIUS + 4)
+            .where(g => {
+                const t = g.tile?.() ?? null;
+                return t != null && Tile.from(t).distanceTo(spot) <= OWN_BONE_LOOT_RADIUS;
+            })
             .nearest();
         if (!ground) {
             return false;
         }
 
-        this.status = 'looting bones';
+        this.status = 'looting own bones';
         const before = Inventory.used();
         await ground.interact('Take');
-        await Execution.delayUntil(() => Inventory.used() > before, 5000);
+        if (await Execution.delayUntil(() => Inventory.used() > before, 5000)) {
+            this.ownBonesPending++;
+            this.log(
+                `looted own-kill bones @ ${spot.x},${spot.z} (pending ${this.ownBonesPending})`
+            );
+        }
         return true;
     }
 
@@ -1159,26 +1572,20 @@ class LumbridgeGoblinKiller extends LoopingBot {
     }
 
     /**
-     * Re-evaluate lowest-stat target after N levels, then assert the combat tab.
+     * After N levels on the current style, randomly pick another melee skill.
      * @returns {Promise<boolean>} true if this loop spent time on the style click
      */
     async ensureCombatStyle() {
-        if (this.autoLowest) {
+        if (this.rotateStyles) {
             const cur = Skills.level(this.desiredStyle);
             if (cur >= this.styleLevelAnchor + this.levelsBeforeSwap) {
-                const next = pickLowestStyle();
-                if (next !== this.desiredStyle) {
-                    this.log(
-                        `swap style ${this.desiredStyle} → ${next} ` +
-                            `(gained ${cur - this.styleLevelAnchor} lv; atk=${Skills.level('attack')} ` +
-                            `str=${Skills.level('strength')} def=${Skills.level('defence')})`
-                    );
-                    this.desiredStyle = next;
-                } else {
-                    this.log(
-                        `${this.desiredStyle} still lowest after ${this.levelsBeforeSwap} lv — continuing`
-                    );
-                }
+                const next = pickRandomStyle(this.desiredStyle);
+                this.log(
+                    `random swap ${this.desiredStyle} → ${next} ` +
+                        `(gained ${cur - this.styleLevelAnchor} lv; atk=${Skills.level('attack')} ` +
+                        `str=${Skills.level('strength')} def=${Skills.level('defence')})`
+                );
+                this.desiredStyle = next;
                 this.styleLevelAnchor = Skills.level(this.desiredStyle);
             }
         }
@@ -1213,11 +1620,15 @@ class LumbridgeGoblinKiller extends LoopingBot {
 
         const haveGear = GEAR.every(g => Equipment.contains(g) || Inventory.first(g));
         if (!haveGear) {
-            // Only bank again after death if sword/shield are actually gone.
             this.gearReady = false;
-            this.log('gear missing after death — one Draynor bank trip, then back to goblins');
+            this.fightNpcIndex = -1;
+            this.fightNpcTile = null;
+            this.ownBoneLootTile = null;
+            this.ownBoneLootUntil = 0;
+            this.ownBonesPending = 0;
+            this.log('gear missing after death — find bank, re-kit, then back to goblins');
             this.recovering = false;
-            this.status = 'walk to Draynor';
+            this.status = 'find bank';
             return;
         }
 
@@ -1234,17 +1645,31 @@ class LumbridgeGoblinKiller extends LoopingBot {
         }
 
         this.status = 'returning';
-        this.log('running back to goblins');
-        const ok = await Traversal.walkResilient(GOBLIN_SPOT, {
+        this.refreshCampChoice();
+        const anchor = this.campAnchor();
+        this.log(
+            this.useRats
+                ? `running back to giant rats ${anchor.x},${anchor.z}`
+                : this.useAltCamp
+                  ? `running back to overflow camp ${anchor.x},${anchor.z}`
+                  : 'running back to goblins'
+        );
+        const ok = await Traversal.walkResilient(anchor, {
             radius: 4,
             log: msg => this.log(`  ${msg}`)
         });
         if (ok) {
             this.recovering = false;
             this.status = 'fighting';
-            this.log('back at goblins');
+            this.log(
+                this.useRats
+                    ? 'back at giant rats'
+                    : this.useAltCamp
+                      ? 'back at overflow camp'
+                      : 'back at goblins'
+            );
         } else {
-            this.log('could not reach goblins after death — will retry');
+            this.log('could not reach camp after death — will retry');
         }
     }
 
@@ -1256,96 +1681,28 @@ class LumbridgeGoblinKiller extends LoopingBot {
         return GEAR.every(g => Equipment.contains(g) || Inventory.first(g));
     }
 
-    /** Inventory stacks that are only Bronze sword, Wooden shield, Bones, and/or Coins. */
-    invOnlyGearOrBones() {
-        return Inventory.items().every(i => {
-            const n = (i.name ?? '').toLowerCase();
-            if (!n) {
-                return false;
-            }
-            if (n === 'bones' || n === 'coins') {
-                return true;
-            }
-            return GEAR.some(g => g.toLowerCase() === n);
-        });
-    }
-
-    /** Worn slots are empty or only Bronze sword / Wooden shield. */
-    wornOnlyGear() {
-        const allowed = new Set(GEAR.map(n => n.toLowerCase()));
-        return Equipment.items()
-            .filter(i => i.name)
-            .every(i => allowed.has((i.name ?? '').toLowerCase()));
-    }
-
     /**
-     * Pack is only sword/shield/bones/coins (or empty), worn is only sword/shield,
-     * and both gear pieces are equipped or in the pack — skip the bank trip.
-     */
-    canSkipBankPrep() {
-        return this.invOnlyGearOrBones() && this.wornOnlyGear() && this.hasGearAvailable();
-    }
-
-    /**
-     * Walk to 3092,3244,0 — first gear action. Never uses Banking.open nearest-bank.
-     * @returns {Promise<boolean>} true if still traveling (caller should return)
-     */
-    async walkToDraynorFirst() {
-        if (distToDraynor(Game.tile()) <= 6) {
-            return false;
-        }
-        if (Bank.isOpen()) {
-            await Bank.close();
-            await Execution.delayTicks(1);
-        }
-        this.status = 'walk to Draynor';
-        this.log(`walking to Draynor @ ${DRAYNOR_BANK.x},${DRAYNOR_BANK.z},0 (one trip)`);
-        await Traversal.walkResilient(DRAYNOR_BANK, {
-            radius: 2,
-            timeoutMs: 180_000,
-            log: m => this.log(`  ${m}`)
-        });
-        // Still en route only if we failed to arrive — don't thrash at the booth.
-        return distToDraynor(Game.tile()) > 6;
-    }
-
-    /**
-     * Open the booth at the Draynor stand. Caller must already be on/near the pin.
-     * Never calls Banking.open() (that web-walks to Al Kharid when no booth is in scene).
+     * Locate and open the nearest bank (web-walks if needed).
      * @returns {Promise<boolean>}
      */
-    async openDraynorBoothHere() {
+    async findAndOpenBank() {
         if (Bank.isOpen()) {
-            if (distToDraynor(Game.tile()) <= 12) {
-                return true;
-            }
-            this.log('wrong bank open — closing');
-            await Bank.close();
-            await Execution.delayTicks(1);
+            return true;
         }
-
-        if (distToDraynor(Game.tile()) > 6) {
-            return false;
-        }
-
-        this.status = 'gear: draynor';
-        this.log('opening Draynor bank booth');
-        if (typeof Bank.openBooth === 'function') {
-            return !!(await Bank.openBooth(DRAYNOR_BANK, 'Bank booth', 'Use-quickly', m =>
-                this.log(`  ${m}`)
-            ));
+        this.status = 'find bank';
+        this.log('finding nearest bank for gear prep');
+        if (typeof Banking !== 'undefined' && Banking && typeof Banking.open === 'function') {
+            return !!(await Banking.open({
+                log: m => this.log(`  ${m}`)
+            }));
         }
         if (typeof Bank.openNearest === 'function') {
             return !!(await Bank.openNearest('Bank booth', 'Use-quickly', m => this.log(`  ${m}`)));
         }
-        this.log('WARNING: Bank.openBooth unavailable — cannot open Draynor without nearest-bank snap');
+        this.log('WARNING: Banking.open unavailable — cannot find a bank');
         return false;
     }
 
-    /**
-     * While the bank is open: withdraw any missing Bronze sword / Wooden shield.
-     * @returns {Promise<boolean>} true if both pieces are equipped or in the pack
-     */
     async withdrawMissingGearFromOpenBank() {
         if (!Bank.isOpen()) {
             return this.hasGearAvailable();
@@ -1402,16 +1759,7 @@ class LumbridgeGoblinKiller extends LoopingBot {
         return this.hasGearAvailable();
     }
 
-    /** Unequip then re-equip Bronze sword + Wooden shield from the pack. */
     async equipGearFromPack() {
-        for (const item of GEAR) {
-            if (!Equipment.contains(item)) {
-                continue;
-            }
-            this.log(`unequipping ${item}`);
-            await Equipment.unequip(item);
-            await Execution.delayTicks(1);
-        }
         for (const item of GEAR) {
             if (Equipment.contains(item)) {
                 continue;
@@ -1420,7 +1768,7 @@ class LumbridgeGoblinKiller extends LoopingBot {
                 continue;
             }
             this.status = `gear: equip ${item}`;
-            this.log(`re-equipping ${item}`);
+            this.log(`equipping ${item}`);
             if (await Equipment.equip(item)) {
                 this.log(`gear: equipped ${item}`);
             } else {
@@ -1431,119 +1779,44 @@ class LumbridgeGoblinKiller extends LoopingBot {
         return this.hasGearEquipped();
     }
 
-    /**
-     * Fresh combat-3 / total-28: (1) walk to 3092,3244,0 first, (2) bank junk except GEAR,
-     * (3) withdraw GEAR if stuck in bank, (4) equip and go.
-     * @returns {Promise<boolean>} true if this loop spent time on travel/gear
-     */
-    async prepFreshDraynorBank() {
-        if (await this.walkToDraynorFirst()) {
-            return true;
-        }
-
-        for (const worn of Equipment.items()) {
-            const name = worn.name;
-            if (!name || isGearName(name)) {
-                continue;
-            }
-            this.log(`gear: unequipping ${name}`);
-            if (!(await Equipment.unequip(name))) {
-                this.log(`gear: could not unequip ${name}`);
-                await Execution.delayTicks(1);
-                return true;
-            }
-            await Execution.delayTicks(1);
-        }
-
-        // Already holding gear and no junk — just equip and fight (no bank thrash).
-        const shouldDeposit = depositExceptGear();
-        const junk = Inventory.items().filter(i => shouldDeposit(i.name ?? ''));
-        if (junk.length === 0 && this.hasGearAvailable()) {
-            await this.equipGearFromPack();
-            this.gearReady = true;
-            this.status = 'walking to goblins';
-            this.log('gear ready — heading to goblins (no bank needed)');
-            return false;
-        }
-
-        if (!(await this.openDraynorBoothHere())) {
-            this.log('could not open Draynor booth — retrying');
-            await Execution.delayTicks(3);
-            return true;
-        }
-
-        if (typeof Bank.loaded === 'function') {
-            await Execution.delayUntil(
-                () => Bank.loaded() || (typeof Bank.items === 'function' && Bank.items().length > 0),
-                5000
-            );
-        }
-        await Execution.delayTicks(1);
-
-        if (distToDraynor(Game.tile()) > 12) {
-            this.log(
-                `bank open but not at Draynor (tile ${Game.tile()?.x},${Game.tile()?.z}) — closing`
-            );
-            if (Bank.isOpen()) {
-                await Bank.close();
-            }
-            await Execution.delayTicks(2);
-            return true;
-        }
-
-        if (junk.length > 0) {
-            this.log('depositing junk at Draynor (keeping Bronze sword + Wooden shield)');
-            await Bank.depositAllMatching(shouldDeposit);
-            await Execution.delayTicks(1);
-        }
-
-        // Gear may already be sitting in the bank from an earlier deposit — pull it out.
-        await this.withdrawMissingGearFromOpenBank();
-        if (Bank.isOpen()) {
-            await Bank.close();
-            await Execution.delayTicks(1);
-        }
-
-        await this.equipGearFromPack();
-
-        if (this.hasGearAvailable()) {
-            this.gearReady = true;
-            this.status = 'walking to goblins';
-            this.log('gear ready (Draynor) — sword + shield; killing goblins until death');
-            return false;
-        }
-
-        this.log('WARNING: missing Bronze sword / Wooden shield after Draynor — retrying');
-        await Execution.delayTicks(5);
-        return true;
-    }
-
-    /**
-     * Non-fresh startup: walk Draynor first, deposit all, withdraw/equip GEAR.
-     * Never uses Banking.open() nearest-bank (Al Kharid).
-     * @returns {Promise<boolean>}
-     */
-    async prepGearAtDraynorBank() {
-        if (await this.walkToDraynorFirst()) {
-            return true;
-        }
-
+    /** Unequip every worn slot into the pack. */
+    async unequipEverything() {
         for (const worn of Equipment.items()) {
             const name = worn.name;
             if (!name) {
                 continue;
             }
+            this.status = `unequip ${name}`;
             this.log(`gear: unequipping ${name}`);
             if (!(await Equipment.unequip(name))) {
                 this.log(`gear: could not unequip ${name}`);
                 await Execution.delayTicks(1);
-                return true;
+                return false;
             }
             await Execution.delayTicks(1);
         }
+        return true;
+    }
 
-        if (!(await this.openDraynorBoothHere())) {
-            this.log('could not open Draynor booth — retrying');
+    /**
+     * Startup / re-gear: find bank → unequip all → deposit inventory → withdraw GEAR → equip.
+     * @returns {Promise<boolean>} true if this loop spent time on travel/gear
+     */
+    async prepGearAtBank() {
+        // First action: locate a bank and open it (walks there if needed).
+        if (!(await this.findAndOpenBank())) {
+            this.log('could not find / open a bank — retrying');
+            await Execution.delayTicks(3);
+            return true;
+        }
+
+        if (!(await this.unequipEverything())) {
+            return true;
+        }
+
+        // Re-open if unequip somehow closed the interface.
+        if (!Bank.isOpen() && !(await this.findAndOpenBank())) {
+            this.log('bank closed during unequip — retrying');
             await Execution.delayTicks(3);
             return true;
         }
@@ -1556,15 +1829,7 @@ class LumbridgeGoblinKiller extends LoopingBot {
         }
         await Execution.delayTicks(1);
 
-        if (distToDraynor(Game.tile()) > 12) {
-            this.log('bank open but not at Draynor — closing');
-            if (Bank.isOpen()) {
-                await Bank.close();
-            }
-            return true;
-        }
-
-        this.log('gear: depositing inventory at Draynor');
+        this.log('gear: depositing inventory');
         if (typeof Bank.depositInventory === 'function') {
             await Bank.depositInventory();
         } else {
@@ -1583,7 +1848,7 @@ class LumbridgeGoblinKiller extends LoopingBot {
         if (this.hasGearAvailable()) {
             this.gearReady = true;
             this.status = 'walking to goblins';
-            this.log('gear ready — sword + shield; killing goblins until death');
+            this.log('gear ready — Bronze sword + Wooden shield; heading to goblins');
             return false;
         }
 
@@ -1593,40 +1858,16 @@ class LumbridgeGoblinKiller extends LoopingBot {
     }
 
     /**
-     * Startup: one Draynor trip. After gearReady, never banks again until death loses gear.
-     * @returns {Promise<boolean>} true if this loop spent time on gear
+     * Startup: find nearest bank, unequip + bank all + withdraw gear. After gearReady,
+     * never banks again until death loses gear.
      */
     async prepCombatGear() {
         if (this.gearReady) {
             return await this.ensureGear();
         }
-
-        if (this.freshStarter === null) {
-            this.latchFreshStarter();
-            if (this.freshStarter === null) {
-                this.status = 'waiting for stats';
-                await Execution.delayTicks(2);
-                return true;
-            }
-        }
-
-        // Already geared — skip bank entirely and go kill.
-        if (this.hasGearAvailable()) {
-            await this.equipGearFromPack();
-            this.gearReady = true;
-            this.status = 'walking to goblins';
-            this.log('already have sword + shield — skipping bank, killing goblins');
-            return false;
-        }
-
-        if (this.freshStarter) {
-            return await this.prepFreshDraynorBank();
-        }
-
-        return await this.prepGearAtDraynorBank();
+        return await this.prepGearAtBank();
     }
 
-    /** @returns {Promise<boolean>} true if this loop spent time equipping */
     async ensureGear() {
         let did = false;
         for (const item of GEAR) {
@@ -1634,7 +1875,6 @@ class LumbridgeGoblinKiller extends LoopingBot {
                 continue;
             }
             if (!Inventory.first(item)) {
-                // Never clear gearReady mid-fight — that caused bank↔goblin thrashing.
                 this.log(`WARNING: ${item} missing mid-fight — bank only after death if lost`);
                 continue;
             }
@@ -1651,35 +1891,36 @@ class LumbridgeGoblinKiller extends LoopingBot {
 
 export default defineBot({
     name: SCRIPT_NAME,
-    version: '1.10.0',
+    version: SCRIPT_VERSION_FULL,
     category: 'Combat',
-    tags: ['goblin', 'lumbridge', 'melee', 'death-recovery', 'xp', 'prayer', 'bank', 'draynor'],
+    tags: ['goblin', 'giant-rat', 'lumbridge', 'melee', 'death-recovery', 'xp', 'prayer', 'bank', 'tutorial', 'benzyme'],
     description:
-        "Benzyme's Goblin Killer — one Draynor gear trip, then goblins until death; drops Beer/Kebab/Casket",
+        "Benzyme's Goblin Killer v2.6 — skips Tutorial Island, bank/gear prep, kill Lumbridge oak-camp goblins; if ≥7 players there, train around the HAM hideout door; at combat 20+ move to 3215,3180 and kill giant rats; bury only bones from your own kills",
     settingsSchema: {
         buryBones: {
             type: 'boolean',
             default: true,
-            label: 'Bury bones',
+            label: 'Bury own-kill bones',
             group: 'Loot',
-            help: 'Loot nearby Bones and bury them from the inventory for Prayer XP'
+            help:
+                'Loot Bones only from NPCs you killed (drop tile of your last kill) and bury those for Prayer XP — ignores other players\' piles'
         },
-        autoLowest: {
+        rotateStyles: {
             type: 'boolean',
             default: true,
-            label: 'Auto train lowest combat stat',
+            label: 'Rotate melee styles',
             group: 'Combat',
-            help: 'Pick Attack / Strength / Defence with the lowest level, then re-pick after N levels'
+            help: 'Train one Attack / Strength / Defence style, then randomly pick another after N levels'
         },
         levelsBeforeSwap: {
             type: 'number',
-            default: 1,
+            default: 5,
             min: 1,
             max: 20,
-            label: 'Levels before swap',
+            label: 'Levels before random swap',
             group: 'Combat',
-            showIf: { key: 'autoLowest', anyOf: ['true'] },
-            help: 'Gain this many levels on the current style before switching to the new lowest'
+            showIf: { key: 'rotateStyles', anyOf: ['true'] },
+            help: 'Scroll bar 1–20: levels to gain on the current style before randomly selecting another'
         },
         meleeStyle: {
             type: 'string',
@@ -1687,9 +1928,9 @@ export default defineBot({
             options: ['attack', 'strength', 'defence'],
             label: 'Melee style',
             group: 'Combat',
-            showIf: { key: 'autoLowest', anyOf: ['false'] },
-            help: 'Fixed combat style when auto-lowest is off'
+            showIf: { key: 'rotateStyles', anyOf: ['false'] },
+            help: 'Fixed combat style when rotate is off'
         }
     },
-    create: () => new LumbridgeGoblinKiller()
+    create: () => new BenzymeGoblinKiller()
 });

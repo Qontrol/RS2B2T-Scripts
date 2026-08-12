@@ -1,5 +1,5 @@
 /**
- * ArdougneThiever — pickpocket Men / Warrior women / Guards in East Ardougne.
+ * ArdougneThiever — pickpocket Men / Warrior women / Guards / Knights in East Ardougne.
  * Completely vibe coded by @.benzyme on Discord via Cursor AI
  * Self-contained ESM for rs2b0t Load local script / Load URL.
  */
@@ -157,6 +157,14 @@ const TARGETS = {
         thieving: 40,
         anchor: new Tile(2661, 3306, 0),
         leash: 19
+    },
+    'ardy knights': {
+        /** In-game NPC name — East Ardougne market knights. */
+        name: 'Knight of Ardougne',
+        npcId: null,
+        thieving: 55,
+        anchor: new Tile(2662, 3305, 0),
+        leash: 20
     }
 };
 
@@ -304,6 +312,11 @@ function isShutDoor(loc) {
 
 function openDoorOp(loc) {
     return loc.actions().find(a => /^open/i.test(a)) ?? null;
+}
+
+/** Men thieving often needs house doors — Warrior/Guard/Knight are outdoors. */
+function needsHouseDoors(cfg) {
+    return (cfg?.name ?? '').toLowerCase() === 'man';
 }
 
 class ArdougneThiever extends LoopingBot {
@@ -742,6 +755,11 @@ class ArdougneThiever extends LoopingBot {
             return;
         }
 
+        // Not pickpocketing / not stunned — if trapped behind a shut door, open it and get outside.
+        if (await this.escapeIfStuckBehindDoor()) {
+            return;
+        }
+
         const cfg = this.targetCfg();
         const here = Game.tile();
         if (!here) {
@@ -755,6 +773,9 @@ class ArdougneThiever extends LoopingBot {
                 radius: 4,
                 log: m => this.log(`  ${m}`)
             });
+            if (needsHouseDoors(cfg)) {
+                await this.clearDoorsForMan(cfg.anchor);
+            }
             return;
         }
 
@@ -767,10 +788,23 @@ class ArdougneThiever extends LoopingBot {
         const npc = this.findTarget();
         if (!npc) {
             this.status = `waiting for ${cfg.name}`;
+            // Door may have closed behind us while waiting — escape before wandering.
+            if (await this.escapeIfStuckBehindDoor()) {
+                return;
+            }
             await Traversal.walkTo(cfg.anchor, { radius: 3, timeoutMs: 8_000 });
-            await this.openNearbyDoor();
+            if (needsHouseDoors(cfg)) {
+                await this.clearDoorsForMan(cfg.anchor);
+            } else {
+                await this.openNearbyDoor();
+            }
             await Execution.delayTicks(2);
             return;
+        }
+
+        if (needsHouseDoors(cfg)) {
+            // Man may be inside a house — open doors before attempting pickpocket.
+            await this.clearDoorsToward(npc.tile());
         }
 
         await this.pickpocket(npc);
@@ -808,6 +842,9 @@ class ArdougneThiever extends LoopingBot {
                 radius: 3,
                 log: m => this.log(`  ${m}`)
             });
+            if (needsHouseDoors(cfg)) {
+                await this.clearDoorsForMan(cfg.anchor);
+            }
             return;
         }
 
@@ -823,6 +860,9 @@ class ArdougneThiever extends LoopingBot {
                 radius: 3,
                 log: m => this.log(`  ${m}`)
             });
+            if (needsHouseDoors(cfg)) {
+                await this.clearDoorsForMan(cfg.anchor);
+            }
             return;
         }
 
@@ -895,6 +935,9 @@ class ArdougneThiever extends LoopingBot {
             radius: 3,
             log: m => this.log(`  ${m}`)
         });
+        if (needsHouseDoors(cfg)) {
+            await this.clearDoorsForMan(cfg.anchor);
+        }
     }
 
     async pickpocket(npc) {
@@ -905,7 +948,11 @@ class ArdougneThiever extends LoopingBot {
         this.log(`Pickpocket ${npc.name} @ ${t.x},${t.z}`);
 
         if (!(await npc.interact(PICKPOCKET_OP))) {
-            await this.openNearbyDoor();
+            if (needsHouseDoors(this.targetCfg())) {
+                await this.clearDoorsToward(t);
+            } else {
+                await this.openNearbyDoor();
+            }
             await Execution.delayTicks(1);
             return;
         }
@@ -1013,10 +1060,24 @@ class ArdougneThiever extends LoopingBot {
             radius: 4,
             log: m => this.log(`  ${m}`)
         });
+        if (needsHouseDoors(cfg)) {
+            await this.clearDoorsForMan(cfg.anchor);
+        }
     }
 
-    async openNearbyDoor() {
-        const door = Locs.query().where(l => isShutDoor(l)).within(6).nearest();
+    /**
+     * Open a shut door near the player, or near an optional tile (house doors by Men).
+     * @param {{ within?: number, near?: { x: number, z: number } | null }} [opts]
+     */
+    async openNearbyDoor({ within = 6, near = null } = {}) {
+        let q = Locs.query().where(l => isShutDoor(l));
+        if (near) {
+            const focus = Tile.from(near);
+            q = q.where(l => Tile.from(l.tile()).distanceTo(focus) <= within);
+        } else {
+            q = q.within(within);
+        }
+        const door = q.nearest();
         if (!door) {
             return false;
         }
@@ -1026,6 +1087,168 @@ class ArdougneThiever extends LoopingBot {
         }
         this.status = 'opening door';
         this.log(`opening ${door.name}`);
+        await door.interact(op);
+        await Execution.delayTicks(2);
+        return true;
+    }
+
+    /**
+     * Shut door within a couple tiles of the player (typical "closed behind us" trap).
+     */
+    findAdjacentShutDoor(within = 2) {
+        return (
+            Locs.query()
+                .where(l => isShutDoor(l))
+                .within(within)
+                .nearest() ?? null
+        );
+    }
+
+    /**
+     * True when a shut door is trapping us and we're not mid-pickpocket.
+     * Skip while stunned / animating a steal, or when a thieve target is already in melee range.
+     */
+    isStuckBehindDoor() {
+        if (this.stunned()) {
+            return false;
+        }
+        if (typeof Game.animating === 'function' && Game.animating()) {
+            return false;
+        }
+        const door = this.findAdjacentShutDoor(2);
+        if (!door) {
+            return false;
+        }
+        // Actively thieving someone next to us — don't treat as stuck.
+        const npc = this.findTarget();
+        if (npc && npc.distance() <= 1) {
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Open shut doors around us and walk back to the outdoor thieving anchor.
+     * @returns {Promise<boolean>} true if we acted on a trapping door
+     */
+    async escapeIfStuckBehindDoor() {
+        if (!this.isStuckBehindDoor()) {
+            return false;
+        }
+
+        const cfg = this.targetCfg();
+        this.status = 'stuck behind door — escaping';
+
+        for (let i = 0; i < 3; i++) {
+            const door = this.findAdjacentShutDoor(2);
+            if (!door) {
+                break;
+            }
+            const op = openDoorOp(door);
+            if (!op) {
+                break;
+            }
+            const t = door.tile();
+            this.log(
+                `stuck behind ${door.name} @ ${t.x},${t.z} — opening to escape outside`
+            );
+            if (door.distance() > 1) {
+                await Traversal.walkTo(t, { radius: 1, timeoutMs: 6_000 });
+            }
+            await door.interact(op);
+            await Execution.delayUntil(
+                () => {
+                    const still = Locs.query()
+                        .where(l => isShutDoor(l))
+                        .where(l => {
+                            const lt = l.tile();
+                            return lt.x === t.x && lt.z === t.z;
+                        })
+                        .nearest();
+                    return still === null;
+                },
+                4000
+            );
+            await Execution.delayTicks(1);
+        }
+
+        // Step back to the outdoor thieving spot.
+        const here = Game.tile();
+        if (here && Tile.from(here).distanceTo(cfg.anchor) > 3) {
+            this.log(`escaping outside to ${cfg.name} @ ${cfg.anchor.x},${cfg.anchor.z}`);
+            await Traversal.walkResilient(cfg.anchor, {
+                radius: 4,
+                log: m => this.log(`  ${m}`)
+            });
+        } else if (here) {
+            // Nudge toward anchor even if already close (get off the doorway tile).
+            await Traversal.walkTo(cfg.anchor, { radius: 3, timeoutMs: 8_000 });
+        }
+
+        return true;
+    }
+
+    /** Open shut doors around the Man anchor (houses near 2625,3291). */
+    async clearDoorsForMan(anchor) {
+        const focus = Tile.from(anchor);
+        this.status = 'opening house doors';
+        for (let i = 0; i < 4; i++) {
+            const door = Locs.query()
+                .where(l => isShutDoor(l))
+                .where(l => Tile.from(l.tile()).distanceTo(focus) <= 10)
+                .nearest();
+            if (!door) {
+                // No house door on anchor — still clear whatever is next to us.
+                await this.openNearbyDoor({ within: 8 });
+                break;
+            }
+
+            if (door.distance() > 2) {
+                this.log(`walking to ${door.name} (${door.distance()}t)`);
+                await Traversal.walkTo(door.tile(), { radius: 1, timeoutMs: 8_000 });
+            }
+
+            const op = openDoorOp(door);
+            if (!op) {
+                break;
+            }
+            this.log(`opening ${door.name} (Man house)`);
+            const opened = await door.interact(op);
+            await Execution.delayTicks(2);
+            if (!opened && isShutDoor(door)) {
+                // Stuck on this door — try a player-local one instead.
+                if (!(await this.openNearbyDoor({ within: 8 }))) {
+                    break;
+                }
+            }
+        }
+        await this.openNearbyDoor({ within: 8 });
+    }
+
+    /** Open doors near the player and near a Man NPC tile. */
+    async clearDoorsToward(toward) {
+        if (await this.openNearbyDoor({ within: 8 })) {
+            return true;
+        }
+        if (!toward) {
+            return false;
+        }
+        const door = Locs.query()
+            .where(l => isShutDoor(l))
+            .where(l => Tile.from(l.tile()).distanceTo(Tile.from(toward)) <= 5)
+            .nearest();
+        if (!door) {
+            return false;
+        }
+        if (door.distance() > 2) {
+            await Traversal.walkTo(door.tile(), { radius: 1, timeoutMs: 8_000 });
+        }
+        const op = openDoorOp(door);
+        if (!op) {
+            return false;
+        }
+        this.status = 'opening door';
+        this.log(`opening ${door.name} (toward Man)`);
         await door.interact(op);
         await Execution.delayTicks(2);
         return true;
@@ -1076,11 +1299,11 @@ class ArdougneThiever extends LoopingBot {
 
 export default defineBot({
     name: SCRIPT_NAME,
-    version: '1.3.0',
+    version: '1.4.0',
     category: 'Thieving',
-    tags: ['thieving', 'ardougne', 'pickpocket', 'man', 'guard', 'warrior', 'cake'],
+    tags: ['thieving', 'ardougne', 'pickpocket', 'man', 'guard', 'warrior', 'knight', 'cake'],
     description:
-        "Benzyme's Ardougne Thiever — pickpocket Men, Warrior women, or Ardougne guards; cake/choc food or wait-for-HP regen with shared HP threshold slider",
+        "Benzyme's Ardougne Thiever — pickpocket Men, Warrior women, Ardougne guards, or ardy knights; cake/choc food or wait-for-HP regen with shared HP threshold slider",
     settingsSchema: {
         target: {
             type: 'string',
@@ -1088,7 +1311,7 @@ export default defineBot({
             options: TARGET_OPTIONS,
             label: 'Pickpocket target',
             group: 'Thieving',
-            help: 'Man at 2625,3291 (Thieving 1), Warrior woman id 15 at 2630,3297 (Thieving 25), or Ardougne guard by name Guard (Thieving 40)'
+            help: 'Man at 2625,3291 (Thieving 1; opens house doors as needed), Warrior woman id 15 at 2630,3297 (Thieving 25), Ardougne guard by name Guard (Thieving 40), or ardy knights (Knight of Ardougne, Thieving 55) in the East Ardougne market'
         },
         eatAtHp: {
             type: 'number',
