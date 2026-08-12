@@ -1,6 +1,7 @@
 /**
  * SneakyArdougne — pickpocket Lumbridge Men until 60gp (HP ≥ 5), then boat to Ardougne
  * via Port Sarim → Karamja → Brimhaven.
+ * Auto-skips Tutorial Island (Accept character design → RuneScape Guide → Yes please).
  * Completely vibe coded by @.benzyme on Discord via Cursor AI
  * Self-contained ESM for rs2b0t Load local script / Load URL.
  */
@@ -30,9 +31,16 @@ const {
 } = abi;
 
 const SCRIPT_NAME = 'SneakyArdougne';
+const SCRIPT_VERSION = '1.1.0';
 
 /** Post-login welcome modal interface id (Close Window top-right). */
 const WELCOME_SCREEN_ID = 5993;
+
+/** Tutorial Island map-square bbox (48,48 → tiles ~3072–3135). */
+const TUT_MIN = 3072;
+const TUT_MAX = 3200;
+/** Tutorial Island guide NPC (some private servers call it Lumbridge Guide). */
+const GUIDE_NAME = 'RuneScape Guide';
 
 function welcomeHost() {
     return globalThis.rs2b0t ?? null;
@@ -123,6 +131,129 @@ async function dismissWelcomeScreen() {
     }
 
     return !isWelcomeModalOpen();
+}
+
+/** True while standing on Tutorial Island (map square ~48,48). */
+function isOnTutorialIsland(tile = Game.tile()) {
+    if (!tile) {
+        return false;
+    }
+    return (
+        tile.x >= TUT_MIN &&
+        tile.x < TUT_MAX &&
+        tile.z >= TUT_MIN &&
+        tile.z < TUT_MAX
+    );
+}
+
+function characterCreationTexts() {
+    const host = welcomeHost();
+    if (!host?.reader || typeof host.reader.mainModalTexts !== 'function') {
+        return [];
+    }
+    return host.reader.mainModalTexts() ?? [];
+}
+
+/** Character design (player_kit) open — Accept to finish appearance. */
+function isCharacterCreationOpen() {
+    const host = welcomeHost();
+    if (!host?.reader) {
+        return false;
+    }
+    const { reader } = host;
+    const main = typeof reader.modals === 'function' ? reader.modals().main : -1;
+    if (main === -1) {
+        return false;
+    }
+
+    const texts = characterCreationTexts();
+    if (
+        texts.some(
+            t =>
+                /design your player/i.test(t) ||
+                /use the buttons below to design/i.test(t) ||
+                /welcome to runescape - use the buttons/i.test(t)
+        )
+    ) {
+        return true;
+    }
+
+    // On tutorial island with an Accept button on the main modal.
+    if (
+        isOnTutorialIsland() &&
+        typeof reader.buttonByText === 'function' &&
+        reader.buttonByText(main, 'Accept') !== -1
+    ) {
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Click Accept on character creation (player_kit clientcode 326).
+ * @returns {Promise<boolean>}
+ */
+async function acceptCharacterCreation() {
+    if (!isCharacterCreationOpen()) {
+        return false;
+    }
+    const host = welcomeHost();
+    if (!host?.reader || !host?.actions) {
+        return false;
+    }
+    const { reader, actions } = host;
+    const main = reader.modals().main;
+    if (main === -1 || typeof actions.ifButton !== 'function') {
+        return false;
+    }
+
+    if (typeof reader.buttonByText === 'function') {
+        const btn = reader.buttonByText(main, 'Accept');
+        if (btn !== -1 && actions.ifButton(btn)) {
+            await Execution.delayTicks(2);
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Tutorial Island guide. Only matches "Lumbridge Guide" while on the island
+ * so we do not re-engage the post-tutorial Lumbridge Guide in town.
+ */
+function findTutorialGuide() {
+    const byName =
+        Npcs.query().name(GUIDE_NAME).nearest() ??
+        Npcs.query()
+            .where(n => /runescape\s*guide/i.test(n.name ?? ''))
+            .nearest() ??
+        null;
+    if (byName) {
+        return byName;
+    }
+    if (!isOnTutorialIsland()) {
+        return null;
+    }
+    return (
+        Npcs.query().name('Lumbridge Guide').nearest() ??
+        Npcs.query()
+            .where(n => /lumbridge\s*guide/i.test(n.name ?? ''))
+            .nearest() ??
+        null
+    );
+}
+
+function pickTutorialSkipOption(options) {
+    if (!options || options.length === 0) {
+        return null;
+    }
+    for (const prefer of [/yes\s*please/i, /skip\s*(the\s*)?tutorial/i, /^yes\b/i]) {
+        const hit = options.find(o => prefer.test(o ?? ''));
+        if (hit) {
+            return hit;
+        }
+    }
+    return options[0] ?? null;
 }
 
 const PICKPOCKET_OP = 'Pickpocket';
@@ -264,6 +395,9 @@ function regionOf(tile) {
     if (inBox(tile, 2820, 3100, 2985, 3290)) {
         return 'karamja';
     }
+    if (isOnTutorialIsland(tile)) {
+        return 'tutorial';
+    }
     return 'unknown';
 }
 
@@ -317,6 +451,8 @@ class SneakyArdougne extends LoopingBot {
     xpAtStart = 0;
     stunnedUntilTick = 0;
     arrived = false;
+    /** False until Tutorial Island / character creation is cleared (or never present). */
+    tutorialCleared = false;
 
     async onStart() {
         await Execution.delayUntil(() => Game.ingame() && Game.tile() !== null, 0);
@@ -330,6 +466,7 @@ class SneakyArdougne extends LoopingBot {
         this.fails = 0;
         this.stunnedUntilTick = 0;
         this.arrived = false;
+        this.tutorialCleared = false;
         this.phase = this.inferPhase();
 
         this.on('chat.message', e => {
@@ -350,8 +487,14 @@ class SneakyArdougne extends LoopingBot {
                 `(wait if HP < ${this.minHp}), then Port Sarim → Karamja → Brimhaven → Ardougne ` +
                 `(no Pirate's Treasure — Customs search dialogue at Brimhaven)`
         );
+        if (isOnTutorialIsland() || isCharacterCreationOpen() || findTutorialGuide()) {
+            this.log('Tutorial Island / character creation detected — will Accept → Guide → skip');
+            this.status = 'tutorial';
+        } else {
+            this.tutorialCleared = true;
+            this.status = this.phase;
+        }
         this.log(`start phase: ${this.phase} · coins ${invCoins()}gp · region ${regionOf(Game.tile())}`);
-        this.status = this.phase;
     }
 
     onStop() {
@@ -394,6 +537,103 @@ class SneakyArdougne extends LoopingBot {
         return Skills.effective('hitpoints') < this.minHp;
     }
 
+    /**
+     * Tutorial Island / character creation:
+     * 1) Click Accept on player design
+     * 2) Talk to RuneScape Guide (or Lumbridge Guide on some servers)
+     * 3) Choose "Yes please." to skip tutorial
+     * Then mark cleared and run the normal thieve → boat route.
+     * @returns {Promise<boolean>} true if this loop spent time on tutorial
+     */
+    async handleTutorialIsland() {
+        if (
+            !isCharacterCreationOpen() &&
+            !isOnTutorialIsland() &&
+            !findTutorialGuide() &&
+            !(
+                typeof ChatDialog !== 'undefined' &&
+                ChatDialog &&
+                (ChatDialog.canContinue() ||
+                    (typeof ChatDialog.isOpen === 'function' && ChatDialog.isOpen()))
+            )
+        ) {
+            this.tutorialCleared = true;
+            this.phase = this.inferPhase();
+            this.log('tutorial cleared — commencing normal script');
+            this.status = this.phase;
+            return false;
+        }
+
+        if (isCharacterCreationOpen()) {
+            this.status = 'tutorial: accept design';
+            this.log('character creation — clicking Accept');
+            if (await acceptCharacterCreation()) {
+                this.log('accepted character design');
+            } else {
+                this.log('could not click Accept — retrying');
+                await Execution.delayTicks(2);
+            }
+            return true;
+        }
+
+        if (typeof ChatDialog !== 'undefined' && ChatDialog) {
+            if (ChatDialog.canContinue()) {
+                this.status = 'tutorial: continue';
+                await ChatDialog.continue();
+                return true;
+            }
+            if (
+                typeof ChatDialog.isOpen === 'function' &&
+                ChatDialog.isOpen() &&
+                typeof ChatDialog.options === 'function' &&
+                ChatDialog.options().length > 0 &&
+                typeof ChatDialog.chooseOption === 'function'
+            ) {
+                const opts = ChatDialog.options();
+                const pick = pickTutorialSkipOption(opts);
+                this.status = 'tutorial: skip option';
+                this.log(`tutorial dialog: [${opts.join(' | ')}] → ${pick ?? 'none'}`);
+                if (pick) {
+                    await ChatDialog.chooseOption(pick);
+                } else {
+                    await ChatDialog.chooseOption();
+                }
+                await Execution.delayTicks(2);
+                return true;
+            }
+        }
+
+        if (isOnTutorialIsland() || findTutorialGuide()) {
+            const guide = findTutorialGuide();
+            if (!guide) {
+                this.status = 'tutorial: find guide';
+                this.log('waiting for tutorial guide');
+                await Execution.delayTicks(3);
+                return true;
+            }
+
+            const talk =
+                guide.actions().find(a => /talk/i.test(a ?? '')) ?? TALK_OP;
+            this.status = 'tutorial: talk to guide';
+            this.log(`Talk-to ${guide.name ?? GUIDE_NAME} — skip tutorial`);
+            await guide.interact(talk);
+            await Execution.delayUntil(
+                () =>
+                    (typeof ChatDialog !== 'undefined' &&
+                        ChatDialog &&
+                        (ChatDialog.canContinue() ||
+                            (typeof ChatDialog.isOpen === 'function' &&
+                                ChatDialog.isOpen()))) ||
+                    !isOnTutorialIsland(),
+                8000
+            );
+            return true;
+        }
+
+        await Execution.delayTicks(2);
+        return true;
+    }
+
     async loop() {
         if (!Game.ingame()) {
             await Execution.delayTicks(5);
@@ -402,6 +642,13 @@ class SneakyArdougne extends LoopingBot {
         if (await dismissWelcomeScreen()) {
             this.status = 'close welcome';
             return;
+        }
+
+        // Fresh accounts: character design → Guide → skip tutorial → Lumbridge thieving.
+        if (!this.tutorialCleared) {
+            if (await this.handleTutorialIsland()) {
+                return;
+            }
         }
 
         if (await this.handleDialog()) {
@@ -952,7 +1199,7 @@ class SneakyArdougne extends LoopingBot {
 
 export default defineBot({
     name: SCRIPT_NAME,
-    version: '1.0.0',
+    version: SCRIPT_VERSION,
     category: 'Thieving',
     tags: [
         'thieving',
@@ -963,10 +1210,11 @@ export default defineBot({
         'brimhaven',
         'ardougne',
         'boat',
-        'travel'
+        'travel',
+        'tutorial'
     ],
     description:
-        "Pickpocket Lumbridge Men until 60gp (regen HP to 5+), then boat Port Sarim → Karamja → Brimhaven → Ardougne. Works without Pirate's Treasure (Customs search at Brimhaven).",
+        "Skips Tutorial Island if needed, then pickpockets Lumbridge Men until 60gp (regen HP to 5+) and boats Port Sarim → Karamja → Brimhaven → Ardougne. Works without Pirate's Treasure (Customs search at Brimhaven).",
     settingsSchema: {},
     create: () => new SneakyArdougne()
 });
