@@ -6,7 +6,7 @@
 </p>
 
 
-<p align="center" style="font-size:72px">SCRIPTS</p>
+<p align="center" style="font-size:96px">SCRIPTS</p>
 
 <p align="center">Scripts designed for use on the <a href="https://rs2b2t.com/">https://rs2b2t.com/</a> server.</p>
 <p align="center">My Discord is .benzyme feel free to message me there with any problems!</p>
