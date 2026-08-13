@@ -1,3 +1,5 @@
+<p align="center"><u><b>ANY PROBLEMS/QUESTIONS ADD .benzyme ON DISCORD</b></u></p>
+
 <p align="center">
   <a href="https://rs2b2t.com/discord" rel="noopener noreferrer" target="_blank">
     <img width="600" alt="rs2b2t-discord-banner" src="https://i.imgur.com/tAEkgGQ.png" />
