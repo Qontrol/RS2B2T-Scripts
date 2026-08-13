@@ -66,7 +66,7 @@ Withdraws raw fish from Catherby bank, cooks on the bank-house range, deposits. 
 ### Flax / Crafting
 
 **`SeersFlaxPicker.js`**  
-Picks flax at the Seers’ Village field and banks at Catherby via the beehives (keeps the gate open). Optional mule mode: pick until a flax threshold, trade noted flax to Zorpix, then resume.
+Picks flax at the Seers’ Village field and banks at Catherby via the beehives (keeps the gate open). Starts by depositing everything and unequipping. Optional mule: type a username, tick Confirm mule, pick until bank flax hits the threshold, trade noted flax to that player, then resume.
 
 **`SeersBowstringSpinner.js`**  
 Withdraws flax from Seers’ Village bank, spins bowstrings upstairs in the house south of the bank. Needs Crafting 10+.
