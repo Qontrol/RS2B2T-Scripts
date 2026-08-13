@@ -1,10 +1,12 @@
-
+ 
 <p align="center">
   <a href="https://rs2b2t.com/discord" rel="noopener noreferrer" target="_blank">
     <img width="600" alt="rs2b2t-discord-banner" src="https://i.imgur.com/tAEkgGQ.png" />
   </a>
 </p>
 
+
+<p align="center" style="font-size:72px">SCRIPTS</p>
 
 <p align="center">Scripts designed for use on the <a href="https://rs2b2t.com/">https://rs2b2t.com/</a> server.</p>
 <p align="center">My Discord is .benzyme feel free to message me there with any problems!</p>
