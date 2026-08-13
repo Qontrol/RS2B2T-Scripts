@@ -1,4 +1,3 @@
-
 <p align="center">
   <a href="https://rs2b2t.com/discord" rel="noopener noreferrer" target="_blank">
     <img width="600" alt="rs2b2t-discord-banner" src="https://i.imgur.com/tAEkgGQ.png" />
@@ -6,8 +5,9 @@
 </p>
 
 
-<p align="center">Scripts designed for use on the <a href="https://rs2b2t.com/">https://rs2b2t.com/</a> server.
-THESE SCRIPTS CAN BE USED FOR WHATEVER YOU LIKE REGARDING YOUR OWN SCRIPTS/PERSONAL USE JUST PLEASE GIVE ME CREDIT.. IF YOU FEEL LIKE IT</p>
+<p align="center">Scripts designed for use on the <a href="https://rs2b2t.com/">https://rs2b2t.com/</a> server.</p>
+
+<p align="center"><u><b>THESE SCRIPTS CAN BE USED FOR WHATEVER YOU LIKE REGARDING YOUR OWN SCRIPTS/PERSONAL USE JUST PLEASE GIVE ME CREDIT.. IF YOU FEEL LIKE IT</b></u></p>
 
 1. Load the bot client via url: https://w1.rs2b2t.com/rs2b0t/ (Make an account via https://rs2b2t.com/register if you haven't already)
 2. Log into your account
@@ -33,13 +33,13 @@ Same oak chop/fletch loop, but sells the bows at Varrock General Store, banks th
 Chops willows at Draynor. Banks willow logs until Fletching 35, then willow shortbows at 35 and willow longbows at 40.
 
 **`MapleTreeFletcher.js`**  
-Chops maples near Seers’ Village. Banks maple logs until Fletching 50, then maple shortbows at 50 and maple longbows at 55. Stops if there is no knife.
+Chops maples near Seers' Village. Banks maple logs until Fletching 50, then maple shortbows at 50 and maple longbows at 55. Stops if there is no knife.
 
 **`YewFletcher.js`**  
 Chops yews between Catherby and Seers. Banks yew logs until Fletching 65, then yew shortbows at 65 and yew longbows at 70. Optional: sell bows to Arhein, bank GP, return. Stops if there is no knife.
 
 **`ProgressiveWcFletcher.js`**  
-Starter woodcutting/fletching pipeline: Falador trees until WC 15 / Fletching 20 → oaks (sell bows in Varrock) until WC 30 / Fletching 35 → Draynor willows (bank bows). Wields a steel axe when Attack allows.
+Starter woodcutting/fletching pipeline: Falador trees until WC 15 / Fletching 20 → oaks (sell bows in Varrock) until WC 30 / Fletching 35 → Draynor willows (bank bows). Wields a steel axe when Att[...]
 
 ### Fishing / Cooking
 
@@ -47,7 +47,7 @@ Starter woodcutting/fletching pipeline: Falador trees until WC 15 / Fletching 20
 Small-net shrimp at Catherby Net+Bait spots. On start it banks everything and withdraws only a small fishing net. Optional cook on the bank-house range before depositing.
 
 **`CatherbyBaitFisher.js`**  
-Bait-rods sardines/herring at Catherby Net+Bait spots. Pulls rod + bait from the bank; buys a rod (5gp) or bait (up to 500) from Harry if missing. Optional cook on the way; optional sell raw catch to Harry.
+Bait-rods sardines/herring at Catherby Net+Bait spots. Pulls rod + bait from the bank; buys a rod (5gp) or bait (up to 500) from Harry if missing. Optional cook on the way; optional sell raw catch to [...]
 
 **`CatherbyLobsters.js`**  
 Cage-fishes lobsters at Catherby Cage+Harpoon spots. Banks, withdraws a lobster pot (or buys one from Harry). Optional cook on the way; optional sell raw lobster to Harry.
@@ -67,13 +67,13 @@ Withdraws raw fish from Catherby bank, cooks on the bank-house range, deposits. 
 ### Flax / Crafting
 
 **`SeersFlaxPicker.js`**  
-Picks flax at the Seers’ Village field and banks at Catherby via the beehives (keeps the gate open). Starts by depositing everything and unequipping. Optional mule: type a username, tick Confirm mule, pick until bank flax hits the threshold, trade noted flax to that player, then resume.
+Picks flax at the Seers' Village field and banks at Catherby via the beehives (keeps the gate open). Starts by depositing everything and unequipping. Optional mule: type a username, tick Confirm mul[...]
 
 **`SeersBowstringSpinner.js`**  
-Withdraws flax from Seers’ Village bank, spins bowstrings upstairs in the house south of the bank. Needs Crafting 10+.
+Withdraws flax from Seers' Village bank, spins bowstrings upstairs in the house south of the bank. Needs Crafting 10+.
 
 **`FlaxHost.js`**  
-Stands at Catherby bank and **receives** noted-flax trades. Banks everything except noted flax, stays leashed to the bank (anti-lure), never offers items. After a genie lamp it steps one tile out and back so the XP overlay doesn’t cover trade requests.
+Stands at Catherby bank and **receives** noted-flax trades. Banks everything except noted flax, stays leashed to the bank (anti-lure), never offers items. After a genie lamp it steps one tile out and [...]
 
 **`CatherbyFlaxMule.js`**  
 Simpler flax receiver: walks to Catherby bank, accepts incoming noted-flax trades, confirms both screens, and keeps listening. Use `FlaxHost.js` if you want banking + anti-lure.
@@ -84,7 +84,7 @@ Crafts soft leather with needle + thread until Crafting 10: gloves → boots at 
 ### Combat / Thieving
 
 **`BenzymeGoblinKiller.js`**  
-Skips Tutorial Island if needed, then fights Lumbridge oak-camp goblins. If that camp is crowded (≥7 players), trains around the HAM hideout door. At combat 20+ switches to giant rats. Optional bury of bones from your own kills; optional melee-style rotation.
+Skips Tutorial Island if needed, then fights Lumbridge oak-camp goblins. If that camp is crowded (≥7 players), trains around the HAM hideout door. At combat 20+ switches to giant rats. Optional bury[...]
 
 **`LegacyGoblinKiller.js`**  
 Older goblin fighter: one Draynor gear trip, then Lumbridge goblins until death. Optional bone bury and combat-stat rotation. Drops beer/kebab/casket. Prefer `BenzymeGoblinKiller.js`.
@@ -96,7 +96,7 @@ Kills Lumbridge cows, loots cowhides (hides over combat), banks at Al Kharid. Op
 Pickpockets in East Ardougne: Men (1), Warrior women (25), Guards (40), or Knights (55). HP handling: wait to regen, or eat cake / chocolate slice.
 
 **`SneakyArdougne.js`**  
-Gets a fresh account to Ardougne: skips Tutorial Island if needed, pickpockets Lumbridge Men until 60gp (HP ≥ 5), then boats Port Sarim → Karamja → Brimhaven → Ardougne. Works without Pirate’s Treasure (Customs search at Brimhaven).
+Gets a fresh account to Ardougne: skips Tutorial Island if needed, pickpockets Lumbridge Men until 60gp (HP ≥ 5), then boats Port Sarim → Karamja → Brimhaven → Ardougne. Works without Pirate⁠[...]
 
 ### Utility / Randoms
 
