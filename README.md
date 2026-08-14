@@ -27,19 +27,19 @@ Most scripts dismiss the welcome screen on start.
 Chops regular trees west of Falador, then fletches by level: arrow shafts → shortbows at 5 → longbows at 10. Banks products and returns.
 
 **`OakTreeFletcher.js`**  
-Chops oaks north of Varrock. Banks oak logs until Fletching 20, then oak shortbows at 20 and oak longbows at 25. Banks and repeats.
+Chops oaks north of Varrock. Fletches oak logs until Fletching 20, then oak shortbows at 20 and oak longbows at 25. Banks and repeats.
 
 **`OakTreeFletcherSell.js`**  
 Same oak chop/fletch loop, but sells the bows at Varrock General Store, banks the coins (keeps knife/axe), then goes back to the oaks.
 
 **`WillowTreeFletcher.js`**  
-Chops willows at Draynor. Banks willow logs until Fletching 35, then willow shortbows at 35 and willow longbows at 40.
+Chops willows at Draynor. Fletches willow logs until Fletching 35, then willow shortbows at 35 and willow longbows at 40.
 
 **`MapleTreeFletcher.js`**  
-Chops maples near Seers' Village. Banks maple logs until Fletching 50, then maple shortbows at 50 and maple longbows at 55. Stops if there is no knife.
+Chops maples near Seers' Village. Fletches maple logs until Fletching 50, then maple shortbows at 50 and maple longbows at 55. Stops if there is no knife.
 
 **`YewFletcher.js`**  
-Chops yews between Catherby and Seers. Banks yew logs until Fletching 65, then yew shortbows at 65 and yew longbows at 70. Optional: sell bows to Arhein, bank GP, return. Stops if there is no knife.
+Chops yews between Catherby and Seers. Fletches yew shortbows at 65 and yew longbows at 70. Optional: sell bows to Arhein, bank GP, return. Stops if there is no knife.
 
 **`ProgressiveWcFletcher.js`**  
 Starter woodcutting/fletching pipeline: Falador trees until WC 15 / Fletching 20 → oaks (sell bows in Varrock) until WC 30 / Fletching 35 → Draynor willows (bank bows). Wields a steel axe when Attack 5+, buys steel axe from Bob if needed, and handles broken axe repairs automatically.
