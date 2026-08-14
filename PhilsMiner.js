@@ -36,7 +36,7 @@ const {
 } = abi;
 
 const SCRIPT_NAME = 'Phils Miner';
-const SCRIPT_VERSION = '1.2';
+const SCRIPT_VERSION = '1.6';
 
 /** Post-login welcome modal interface id (Close Window top-right). */
 const WELCOME_SCREEN_ID = 5993;
@@ -137,17 +137,25 @@ const HANDLE_BANK = 'Bank';
 const HANDLE_SELL = 'Sell at store';
 const HANDLE_OPTIONS = [HANDLE_POWERMINE, HANDLE_BANK, HANDLE_SELL];
 
+/** Drogo's Mining Emporium (buys ore) — west of the Falador stairs landing. */
+const DROGO_STAND = new Tile(3038, 9756, 0);
+const DROGO_KEEPERS = ['Drogo', 'Shop keeper', 'Shop assistant'];
+
+/** Nurmof's Pickaxe Shop — south-west in the dwarven mine. */
+const NURMOF_STAND = new Tile(2998, 9812, 0);
+const NURMOF_NAME = 'Nurmof';
+
 /* ── Pickaxes: Mining to use, Attack to wield. Highest first. ── */
 
 const PICKAXES = [
     { name: 'Dragon pickaxe', aliases: ['Dragon pickaxe'], mining: 61, attack: 60 },
-    { name: 'Rune pickaxe', aliases: ['Rune pickaxe', 'Runite pickaxe'], mining: 41, attack: 40 },
-    { name: 'Adamant pickaxe', aliases: ['Adamant pickaxe', 'Adamantite pickaxe'], mining: 31, attack: 30 },
-    { name: 'Mithril pickaxe', aliases: ['Mithril pickaxe'], mining: 21, attack: 20 },
+    { name: 'Rune pickaxe', aliases: ['Rune pickaxe', 'Runite pickaxe'], mining: 41, attack: 40, nurmofPrice: 32_000 },
+    { name: 'Adamant pickaxe', aliases: ['Adamant pickaxe', 'Adamantite pickaxe'], mining: 31, attack: 30, nurmofPrice: 3_200 },
+    { name: 'Mithril pickaxe', aliases: ['Mithril pickaxe'], mining: 21, attack: 20, nurmofPrice: 1_300 },
     { name: 'Black pickaxe', aliases: ['Black pickaxe'], mining: 11, attack: 10 },
-    { name: 'Steel pickaxe', aliases: ['Steel pickaxe'], mining: 6, attack: 5 },
-    { name: 'Iron pickaxe', aliases: ['Iron pickaxe'], mining: 1, attack: 1 },
-    { name: 'Bronze pickaxe', aliases: ['Bronze pickaxe'], mining: 1, attack: 1 }
+    { name: 'Steel pickaxe', aliases: ['Steel pickaxe'], mining: 6, attack: 5, nurmofPrice: 500 },
+    { name: 'Iron pickaxe', aliases: ['Iron pickaxe'], mining: 1, attack: 1, nurmofPrice: 140 },
+    { name: 'Bronze pickaxe', aliases: ['Bronze pickaxe'], mining: 1, attack: 1, nurmofPrice: 1 }
 ];
 
 /** Re-check bank for a better pick when Mining hits these. */
@@ -299,7 +307,11 @@ const SITES = {
         shopStand: new Tile(3038, 9756, 0),
         shopKeepers: ['Drogo', 'Shop keeper', 'Shop assistant'],
         shopUnderground: true,
-        ores: DWARVEN_ORES
+        ores: DWARVEN_ORES,
+        /** Stand tile for "Phils copper spot" — rocks are adjacent, not on this square. */
+        preferRocks: {
+            copper: new Tile(3026, 9802, 0)
+        }
     },
     [LOC_DWARVEN_BV]: {
         id: 'dwarven-bv',
@@ -319,7 +331,7 @@ const SITES = {
         shopKeepers: ['Drogo', 'Shop keeper', 'Shop assistant'],
         shopUnderground: true,
         ores: DWARVEN_ORES,
-        /** When Copper is selected, camp on and mine this rock first. */
+        /** Stand tile for "Phils copper spot" — rocks are adjacent, not on this square. */
         preferRocks: {
             copper: new Tile(3026, 9802, 0)
         }
@@ -379,6 +391,15 @@ function readPrefRaw(key) {
 function readPrefStr(key, fallback) {
     const raw = readPrefRaw(key);
     return raw !== null ? raw.trim() : fallback;
+}
+
+function readPrefBool(key, fallback) {
+    const raw = readPrefRaw(key);
+    if (raw === null) {
+        return fallback;
+    }
+    const n = raw.trim().toLowerCase();
+    return n === 'true' || n === '1' || n === 'yes';
 }
 
 function isPanelPaused() {
@@ -478,6 +499,58 @@ function hasUsablePick() {
     return bestHeldPickDef() !== null;
 }
 
+function pickRank(def) {
+    if (!def) {
+        return 999;
+    }
+    const i = PICKAXES.indexOf(def);
+    return i < 0 ? 999 : i;
+}
+
+function coinCount() {
+    return Inventory.items()
+        .filter(i => normName(i.name) === 'coins')
+        .reduce((n, i) => n + Math.max(0, i.count), 0);
+}
+
+/**
+ * Nurmof upgrades we can use (Mining) and afford, better than the current pick.
+ * Best first (Rune → … → Iron).
+ */
+function nurmofUpgradesAffordable(mining, gp, currentDef) {
+    const currentRank = pickRank(currentDef);
+    return PICKAXES.filter(
+        d =>
+            typeof d.nurmofPrice === 'number' &&
+            mining >= d.mining &&
+            gp >= d.nurmofPrice &&
+            pickRank(d) < currentRank
+    );
+}
+
+function shopStockCount(def) {
+    if (typeof Shop.stock !== 'function' || !Shop.isOpen()) {
+        return -1;
+    }
+    const rows = Shop.stock() ?? [];
+    const names = new Set(def.aliases.map(a => a.toLowerCase()));
+    let n = 0;
+    for (const row of rows) {
+        if (names.has(normName(row.name))) {
+            n += Math.max(0, row.count ?? 0);
+        }
+    }
+    return n;
+}
+
+function isBestPickName(name, bestDef) {
+    if (!bestDef || !name) {
+        return false;
+    }
+    const n = normName(name);
+    return bestDef.aliases.some(a => a.toLowerCase() === n);
+}
+
 function equippedPickName() {
     if (typeof Equipment.items !== 'function') {
         return null;
@@ -502,8 +575,52 @@ function isUnderground(tile) {
     return Tile.from(tile).z >= 6400;
 }
 
+function locActionList(loc) {
+    if (!loc) {
+        return [];
+    }
+    try {
+        if (typeof loc.actions === 'function') {
+            return loc.actions() ?? [];
+        }
+    } catch {
+        /* some loc wrappers throw */
+    }
+    return [];
+}
+
 function mineOp(actions) {
-    return (actions ?? []).find(a => /^mine$/i.test(a)) ?? null;
+    return (actions ?? []).find(a => /^mine/i.test(String(a))) ?? null;
+}
+
+function locMineOp(loc) {
+    return mineOp(locActionList(loc));
+}
+
+function locTile(loc) {
+    if (!loc) {
+        return null;
+    }
+    try {
+        const t = typeof loc.tile === 'function' ? loc.tile() : loc.tile;
+        if (!t) {
+            return null;
+        }
+        return Tile.from(t);
+    } catch {
+        return null;
+    }
+}
+
+function tileCheb(a, b) {
+    if (!a || !b) {
+        return 999;
+    }
+    const p = Tile.from(a);
+    const q = Tile.from(b);
+    const pz = p.z ?? p.y ?? 0;
+    const qz = q.z ?? q.y ?? 0;
+    return Math.max(Math.abs(p.x - q.x), Math.abs(pz - qz));
 }
 
 function climbOp(actions, dir) {
@@ -628,17 +745,12 @@ function wantedOres(site, choice, mining) {
     return [specific];
 }
 
-/** Preferred rock tile for this site + ore dropdown (e.g. dwarven copper at 3026,9802). */
-function preferredRockTile(site, oreChoice) {
-    const prefs = site?.preferRocks;
-    if (!prefs || !oreChoice) {
+/** 3026,9802 copper pin — only when Phils copper spot is ticked. */
+function preferredRockTile(site, { philsCopperSpot } = {}) {
+    if (!philsCopperSpot) {
         return null;
     }
-    const key = String(oreChoice).toLowerCase();
-    if (key === 'copper') {
-        return prefs.copper ?? null;
-    }
-    return null;
+    return site?.preferRocks?.copper ?? null;
 }
 
 function closestLocTo(locs, tile) {
@@ -673,6 +785,9 @@ class PhilsMiner extends LoopingBot {
     location = LOC_ALKHARID;
     oreChoice = ORE_HIGHEST;
     handling = HANDLE_BANK;
+    sellAndUpgrade = false;
+    philsCopperSpot = false;
+    pickUpgrades = 0;
     /** @type {ReturnType<typeof setInterval> | null} */
     unlockTimer = null;
 
@@ -680,10 +795,10 @@ class PhilsMiner extends LoopingBot {
         return SITES[this.location] ?? SITES[LOC_ALKHARID];
     }
 
-    /** Stand / leash pin — copper at Dwarven mine enterance uses 3026,9802. */
+    /** Stand on 3026,9802 when Phils copper spot is ticked (rocks are adjacent). */
     camp() {
         const site = this.site();
-        return preferredRockTile(site, this.oreChoice) ?? site.anchor;
+        return preferredRockTile(site, { philsCopperSpot: this.philsCopperSpot }) ?? site.anchor;
     }
 
     /** Map saved "Dwarven mine" (1.0) onto the Falador stairs location. */
@@ -706,6 +821,7 @@ class PhilsMiner extends LoopingBot {
         this.mined = 0;
         this.bankTrips = 0;
         this.sellTrips = 0;
+        this.pickUpgrades = 0;
         this.lastOreSeen = oreCount();
         this.gearReady = false;
         this.loggedRockNames = false;
@@ -725,7 +841,8 @@ class PhilsMiner extends LoopingBot {
 
         const site = this.site();
         this.log(
-            `Phils Miner ${SCRIPT_VERSION} — ${this.location} / ${this.oreChoice} / ${this.handling} — ` +
+            `Phils Miner ${SCRIPT_VERSION} — ${this.location} / ${this.oreChoice} / ` +
+                `${this.sellAndUpgrade ? 'sell+upgrade' : this.handling} — ` +
                 `Mining ${Skills.level('mining')} Attack ${Skills.level('attack')}`
         );
         if (Skills.level('mining') < site.minMining) {
@@ -746,7 +863,7 @@ class PhilsMiner extends LoopingBot {
         }
         this.log(
             `stopped — mined ~${this.mined}, bank trips ${this.bankTrips}, ` +
-                `sell trips ${this.sellTrips} (${this.status})`
+                `sell trips ${this.sellTrips}, upgrades ${this.pickUpgrades} (${this.status})`
         );
     }
 
@@ -754,6 +871,8 @@ class PhilsMiner extends LoopingBot {
         const prevLoc = this.location;
         const prevOre = this.oreChoice;
         const prevHandle = this.handling;
+        const prevUpgrade = this.sellAndUpgrade;
+        const prevCopperSpot = this.philsCopperSpot;
 
         this.location = this.readLocation();
 
@@ -781,6 +900,16 @@ class PhilsMiner extends LoopingBot {
             HANDLE_BANK
         );
 
+        this.sellAndUpgrade = readPrefBool(
+            'sellAndUpgrade',
+            this.settings.bool('sellAndUpgrade', false)
+        );
+
+        this.philsCopperSpot = readPrefBool(
+            'philsCopperSpot',
+            this.settings.bool('philsCopperSpot', false)
+        );
+
         if (!silent) {
             if (prevLoc !== this.location) {
                 this.log(`prefs: location → ${this.location}`);
@@ -791,6 +920,12 @@ class PhilsMiner extends LoopingBot {
             }
             if (prevHandle !== this.handling) {
                 this.log(`prefs: handling → ${this.handling}`);
+            }
+            if (prevUpgrade !== this.sellAndUpgrade) {
+                this.log(`prefs: sell+upgrade → ${this.sellAndUpgrade ? 'on' : 'off'}`);
+            }
+            if (prevCopperSpot !== this.philsCopperSpot) {
+                this.log(`prefs: Phils copper spot → ${this.philsCopperSpot ? 'on' : 'off'}`);
             }
         }
     }
@@ -828,7 +963,7 @@ class PhilsMiner extends LoopingBot {
         }
 
         if (Shop.isOpen()) {
-            if (this.handling === HANDLE_SELL && oreCount() > 0) {
+            if ((this.sellAndUpgrade || this.handling === HANDLE_SELL) && oreCount() > 0) {
                 await this.sellOpenShop();
                 return;
             }
@@ -889,7 +1024,10 @@ class PhilsMiner extends LoopingBot {
                 this.logNearbyMineLocs();
                 this.loggedRockNames = true;
             }
-            await Traversal.walkTo(this.camp(), { radius: 1, timeoutMs: 8_000 });
+            await Traversal.walkTo(this.camp(), {
+                radius: this.philsCopperSpot ? 0 : 2,
+                timeoutMs: 8_000
+            });
             await Execution.delayTicks(2);
             return;
         }
@@ -1054,6 +1192,10 @@ class PhilsMiner extends LoopingBot {
     }
 
     async handleFullPack() {
+        if (this.sellAndUpgrade) {
+            await this.sellAndUpgradeCycle();
+            return;
+        }
         if (this.handling === HANDLE_POWERMINE) {
             await this.dropOres();
             return;
@@ -1243,6 +1385,209 @@ class PhilsMiner extends LoopingBot {
     }
 
     /**
+     * Sell ore to Drogo, buy the best Nurmof pickaxe we can use and afford,
+     * then bank the old pickaxe via this location's bank route.
+     */
+    async sellAndUpgradeCycle() {
+        const n = oreCount();
+        this.status = 'sell+upgrade';
+        this.log(`sell+upgrade: selling ${n} ore at Drogo`);
+
+        if (!(await this.ensureDwarvenShops())) {
+            return;
+        }
+
+        if (!(await this.walkOpenKeeper(DROGO_STAND, DROGO_KEEPERS, 'Drogo'))) {
+            return;
+        }
+        await this.sellOpenShop();
+        this.sellTrips++;
+        this.lastOreSeen = oreCount();
+
+        if (oreCount() > 0) {
+            return;
+        }
+
+        const bought = await this.tryUpgradeAtNurmof();
+        if (bought) {
+            await this.bankOldPickaxesAfterUpgrade();
+        }
+        this.status = 'returning to rocks';
+    }
+
+    /** Get underground in the dwarven mine so Drogo / Nurmof are reachable. */
+    async ensureDwarvenShops() {
+        const here = Game.tile();
+        if (here && isUnderground(here)) {
+            return true;
+        }
+        const site = this.site();
+        if (site.underground) {
+            return await this.ensureAtSite();
+        }
+        const falador = SITES[LOC_FALADOR_SCORPION];
+        this.status = 'sell+upgrade: Falador stairs';
+        this.log('sell+upgrade: walking to Falador scorpion enterance for Drogo');
+        await Traversal.walkResilient(falador.surfaceEnter, {
+            radius: 1,
+            log: m => this.log(`  ${m}`)
+        });
+        await this.openNearbyDoor();
+        if (!(await this.climb('down', falador.surfaceEnter))) {
+            this.log('sell+upgrade: could not climb down Falador stairs');
+            await Execution.delayTicks(3);
+            return false;
+        }
+        return isUnderground(Game.tile());
+    }
+
+    async walkOpenKeeper(stand, keepers, label) {
+        const here = Game.tile();
+        if (!here || Tile.from(here).distanceTo(stand) > 2) {
+            this.status = `walking to ${label}`;
+            await Traversal.walkResilient(stand, {
+                radius: 2,
+                log: m => this.log(`  ${m}`)
+            });
+        }
+        await this.openNearbyDoor();
+        this.status = `opening ${label}`;
+        for (const keeper of keepers) {
+            if (await Shop.open(keeper)) {
+                return true;
+            }
+        }
+        const npc = Npcs.query()
+            .where(n => keepers.some(k => normName(n.name) === k.toLowerCase()))
+            .nearest();
+        if (npc && (await Shop.open(npc.name))) {
+            return true;
+        }
+        this.log(`could not open ${label} — retrying next loop`);
+        await Execution.delayTicks(3);
+        return false;
+    }
+
+    /**
+     * Buy the best Nurmof pickaxe we can mine with and afford.
+     * @returns {Promise<boolean>} true if a new pickaxe was bought
+     */
+    async tryUpgradeAtNurmof() {
+        const mining = Skills.level('mining');
+        const gp = coinCount();
+        const current = bestHeldPickDef();
+        const options = nurmofUpgradesAffordable(mining, gp, current);
+        if (options.length === 0) {
+            this.log(
+                `sell+upgrade: ${gp}gp, ${current?.name ?? 'no pick'} — no Nurmof upgrade yet`
+            );
+            return false;
+        }
+
+        if (!(await this.walkOpenKeeper(NURMOF_STAND, [NURMOF_NAME], NURMOF_NAME))) {
+            return false;
+        }
+
+        for (const def of options) {
+            const stock = shopStockCount(def);
+            if (stock === 0) {
+                this.log(`sell+upgrade: ${def.name} out of stock`);
+                continue;
+            }
+            if (coinCount() < def.nurmofPrice) {
+                continue;
+            }
+            const before = heldPickCountDef(def);
+            this.status = `buying ${def.name}`;
+            this.log(`sell+upgrade: buying ${def.name} for ${def.nurmofPrice}gp (have ${coinCount()}gp)`);
+            let got = false;
+            for (const alias of def.aliases) {
+                const bought = await Shop.buy(alias, 1);
+                if (bought > 0 || heldPickCountDef(def) > before) {
+                    got = true;
+                    break;
+                }
+            }
+            if (got) {
+                this.log(`sell+upgrade: bought ${def.name}`);
+                this.pickUpgrades++;
+                if (Shop.isOpen()) {
+                    await Shop.close();
+                }
+                await Execution.delayTicks(1);
+                await this.maybeWieldPick();
+                return true;
+            }
+            this.log(`sell+upgrade: ${def.name} buy failed — trying next`);
+        }
+
+        if (Shop.isOpen()) {
+            await Shop.close();
+        }
+        this.log('sell+upgrade: no pickaxe bought (stock / coins)');
+        return false;
+    }
+
+    async bankOldPickaxesAfterUpgrade() {
+        const best = bestHeldPickDef();
+        if (!best) {
+            return;
+        }
+
+        const worn = equippedPickName();
+        if (worn && !isBestPickName(worn, best) && typeof Equipment.unequip === 'function') {
+            this.log(`sell+upgrade: unequipping old ${worn}`);
+            await Equipment.unequip(worn);
+            await Execution.delayTicks(1);
+        }
+
+        const extras = Inventory.items().filter(
+            i => isPickaxeName(i.name) && !isBestPickName(i.name, best)
+        );
+        if (extras.length === 0) {
+            await this.maybeWieldPick();
+            return;
+        }
+
+        this.status = 'banking old pickaxe';
+        this.log(`sell+upgrade: banking old pickaxe(s), keeping ${best.name}`);
+
+        if (Game.tile() && isUnderground(Game.tile())) {
+            await this.climbToSurface();
+        }
+        await this.walkToSiteBank();
+
+        if (!Bank.isOpen()) {
+            if (
+                !(await Banking.open({
+                    stand: this.site().bankStand,
+                    log: m => this.log(`  ${m}`)
+                }))
+            ) {
+                this.log('sell+upgrade: could not open bank for old pickaxe');
+                await Execution.delayTicks(3);
+                return;
+            }
+        }
+
+        await gearWaitBankLoaded();
+        await Bank.depositAllMatching(name => {
+            if (normName(name) === 'coins') {
+                return false;
+            }
+            if (isBestPickName(name, best)) {
+                return false;
+            }
+            return isPickaxeName(name) || isOreItemName(name);
+        });
+        await Execution.delayTicks(1);
+        await Bank.close();
+        await Execution.delayTicks(1);
+        this.bankTrips++;
+        await this.maybeWieldPick();
+    }
+
+    /**
      * Walk / climb to the selected mine camp.
      * @returns {Promise<boolean>} true when standing inside the leash
      */
@@ -1284,21 +1629,22 @@ class PhilsMiner extends LoopingBot {
                 return false;
             }
             const camp = this.camp();
-            const prefer = preferredRockTile(site, this.oreChoice);
-            const stay = prefer ? 2 : site.leash;
+            const prefer = preferredRockTile(site, { philsCopperSpot: this.philsCopperSpot });
+            const stay = prefer ? 0 : site.leash;
             if (Tile.from(under).distanceTo(camp) > stay) {
                 this.status = `walking to ${site.label} rocks`;
                 this.log(
-                    `walking to ${site.label} camp ${camp.x},${camp.z}` +
-                        (prefer ? ' (preferred copper)' : '')
+                    `walking to ${site.label} stand ${camp.x},${camp.z}` +
+                        (prefer ? ' (Phils copper spot — rocks are adjacent)' : '')
                 );
                 await Traversal.walkResilient(camp, {
-                    radius: prefer ? 1 : 3,
+                    radius: prefer ? 0 : 3,
                     log: m => this.log(`  ${m}`)
                 });
             }
             const at = Game.tile();
-            return !!at && isUnderground(at) && Tile.from(at).distanceTo(camp) <= site.leash;
+            const arrived = prefer ? 1 : site.leash;
+            return !!at && isUnderground(at) && Tile.from(at).distanceTo(camp) <= arrived;
         }
 
         if (isUnderground(here)) {
@@ -1475,65 +1821,85 @@ class PhilsMiner extends LoopingBot {
         }
 
         const camp = this.camp();
-        const prefer = preferredRockTile(site, this.oreChoice);
-        const inLeash = l => Tile.from(l.tile()).distanceTo(camp) <= site.leash;
+        const prefer = preferredRockTile(site, { philsCopperSpot: this.philsCopperSpot });
+        const copper = wanted.find(o => o.id === 'copper') ?? ORE_COPPER;
+        const inLeash = l => {
+            const t = locTile(l);
+            return t != null && tileCheb(t, camp) <= site.leash;
+        };
 
-        for (const ore of wanted) {
-            const orePin = prefer && ore.id === 'copper' ? prefer : null;
-            const candidates =
-                Locs.query()
-                    .where(l => mineOp(l.actions()) !== null)
-                    .where(l => locMatchesOre(l, ore))
-                    .where(inLeash)
-                    .results() ?? [];
-
-            if (orePin && candidates.length > 0) {
-                const pinned = candidates.filter(l => Tile.from(l.tile()).distanceTo(orePin) <= 1);
-                const pick = closestLocTo(pinned.length > 0 ? pinned : candidates, orePin);
-                if (pick) {
-                    return { rock: pick, ore };
-                }
-            }
-
-            const rock = closestLocTo(candidates, camp) ?? candidates[0] ?? null;
-            if (rock) {
-                return { rock, ore };
+        // Stand on 3026,9802; mine rocks on the adjacent squares (not on the stand tile).
+        if (prefer) {
+            const adjacent = Locs.query()
+                .where(l => locMineOp(l) !== null)
+                .where(l => {
+                    const t = locTile(l);
+                    if (!t) {
+                        return false;
+                    }
+                    const d = tileCheb(t, prefer);
+                    return d >= 1 && d <= 2;
+                })
+                .nearest();
+            if (adjacent) {
+                return { rock: adjacent, ore: copper };
             }
         }
 
-        const namedExists = Locs.query()
-            .where(l => site.ores.some(o => locMatchesOre(l, o)))
-            .where(inLeash)
-            .nearest();
-
-        if (!namedExists && (this.oreChoice === ORE_ALL || this.oreChoice === ORE_HIGHEST)) {
-            const generic = Locs.query()
-                .where(l => mineOp(l.actions()) !== null)
-                .where(l => isGenericRockName(l.name) || /rock/i.test(l.name ?? ''))
+        for (const ore of wanted) {
+            const named = Locs.query()
+                .where(l => locMineOp(l) !== null)
+                .where(l => locMatchesOre(l, ore))
                 .where(inLeash)
                 .nearest();
-            if (generic) {
-                return { rock: generic, ore: wanted[0] };
+            if (named) {
+                return { rock: named, ore };
             }
+        }
+
+        const generic = Locs.query()
+            .where(l => locMineOp(l) !== null)
+            .where(l => isGenericRockName(l.name) || /rock/i.test(l.name ?? ''))
+            .where(l => {
+                const t = locTile(l);
+                if (!t) {
+                    return false;
+                }
+                if (prefer) {
+                    const d = tileCheb(t, prefer);
+                    return d >= 1 && d <= 2;
+                }
+                return tileCheb(t, camp) <= site.leash;
+            })
+            .nearest();
+        if (generic) {
+            return { rock: generic, ore: wanted[0] };
         }
 
         return null;
     }
 
     logNearbyMineLocs() {
-        const site = this.site();
-        const locs = Locs.query()
-            .where(l => mineOp(l.actions()) !== null)
-            .where(l => Tile.from(l.tile()).distanceTo(this.camp()) <= site.leash + 6)
-            .results();
-        const names = [...new Set((locs ?? []).map(l => l.name ?? '?'))];
+        const camp = this.camp();
+        const nearest = Locs.query()
+            .where(l => locMineOp(l) !== null)
+            .nearest();
+        if (!nearest) {
+            this.log(
+                `no ${this.oreChoice} rock at ${camp.x},${camp.z} — no Mine locs in scene`
+            );
+            return;
+        }
+        const t = locTile(nearest);
         this.log(
-            `no ${this.oreChoice} rocks in leash at ${site.label} — Mine locs: [${names.join(', ') || 'none'}]`
+            `no ${this.oreChoice} rock at ${camp.x},${camp.z} — nearest Mine loc: ` +
+                `${nearest.name ?? '?'} @ ${t?.x ?? '?'},${t?.z ?? '?'} ` +
+                `actions=[${locActionList(nearest).join(', ')}] dist=${nearest.distance()}t`
         );
     }
 
     async mineRock({ rock, ore }) {
-        const op = mineOp(rock.actions());
+        const op = locMineOp(rock);
         if (!op) {
             await Execution.delayTicks(1);
             return;
@@ -1582,9 +1948,12 @@ class PhilsMiner extends LoopingBot {
         const lines = [
             `Phils Miner ${SCRIPT_VERSION}  Mine ${Skills.level('mining')}  Atk ${Skills.level('attack')}  ${pick}`,
             `time ${fmtElapsed(elapsed)}  ·  ${this.location}  ·  ${this.status}`,
-            `${this.oreChoice}  ·  ${this.handling}  ·  inv ${oreCount()}`,
+            `${this.oreChoice}` +
+                (this.philsCopperSpot ? '  ·  Phils copper spot' : '') +
+                `  ·  ${this.sellAndUpgrade ? 'sell+upgrade' : this.handling}  ·  inv ${oreCount()}`,
             `mined ${this.mined} (${fmtXph(orePh)}/hr)  trips ${this.bankTrips}` +
                 (this.sellTrips ? `  sells ${this.sellTrips}` : '') +
+                (this.pickUpgrades ? `  upgrades ${this.pickUpgrades}` : '') +
                 `  XP ${fmtXph(xph)}/hr`
         ];
 
@@ -1664,15 +2033,35 @@ export default defineBot({
             help:
                 'Falador scorpion enterance (east stairs) and Dwarven mine enterance (Barbarian Village ladder): Copper, Tin, Iron, Coal, Gold, Mithril.'
         },
+        philsCopperSpot: {
+            type: 'boolean',
+            default: false,
+            label: 'Phils copper spot',
+            group: 'Mine',
+            showIf: { key: 'location', anyOf: [LOC_FALADOR_SCORPION, LOC_DWARVEN_BV] },
+            help:
+                'When ticked: stand on 3026,9802 and mine the copper rocks on the tiles next to it (not on that square). When off: Copper uses the normal dwarven camp — no forced stand tile.'
+        },
         handling: {
             type: 'string',
             default: HANDLE_BANK,
             options: HANDLE_OPTIONS,
             label: 'When inventory is full',
             group: 'Handling',
+            showIf: { key: 'sellAndUpgrade', anyOf: ['false'] },
             help:
                 'Powermine drops ore on the spot. Bank always uses that location\'s own route: Al Kharid bank, Falador east via guild/Falador stairs, or Edgeville via the Barbarian Village ladder. ' +
                 'Sell at store uses Drogo (inside the dwarven mine) or the town general store.'
+        },
+        sellAndUpgrade: {
+            type: 'boolean',
+            default: false,
+            label: 'Sell and upgrade mode',
+            group: 'Handling',
+            help:
+                'When on: full inventories are sold to Drogo (ore shop in the dwarven mine). ' +
+                'Coins stay in the pack. When you can afford a better pickaxe you can use (Mining level) at Nurmof — Iron 140gp, Steel 500gp, Mithril 1,300gp, Adamant 3,200gp, Rune 32,000gp — it buys that pickaxe and banks the old one on this location\'s bank route. ' +
+                'If Nurmof is out of stock it keeps mining and tries again next trip. Overrides Powermine / Bank / Sell at store.'
         }
     },
     create: () => new PhilsMiner()
