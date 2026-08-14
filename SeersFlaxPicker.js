@@ -2,7 +2,7 @@
  * SeersFlaxPicker — pick Flax at the Seers' Village field, bank at Catherby via beehives.
  * Start: empty inventory + unequip everything. Route flax ↔ bank through the apiary;
  * open/keep the beehive gate open. Each bank trip deposits the entire inventory + unequips.
- * Optional Mule mode: pick/bank until flax threshold, trade noted to Zorpix, resume picking.
+ * Optional Mule mode: pick/bank until flax threshold, trade noted to YOUR MULE, resume picking.
  * Completely vibe coded by @.benzyme on Discord via Cursor AI
  * Self-contained ESM for rs2b0t Load local script / Load URL.
  */
@@ -41,7 +41,7 @@ const SCRIPT_NAME = 'SeersFlaxPicker';
 const WELCOME_SCREEN_ID = 5993;
 
 /** Mule partner — receive noted flax and stop. */
-const MULE_NAME = 'Zorpix';
+const MULE_NAME = 'ENTER_MULE_NAME HERE';
 const MULE_TRADE_RANGE = 2;
 const MULE_TRADE_REQUEST_MS = 5_000;
 /** Pause before first Accept on each trade screen (offer + confirm). */
