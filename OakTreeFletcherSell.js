@@ -1390,7 +1390,7 @@ export default defineBot({
             default: true,
             label: 'Fletch logs into bows',
             group: 'Fletching',
-            help: 'When on: fletch oak logs into bows and sell them (needs a Knife). When off: bank the logs instead.'
+            help: 'When on: fletch oak shortbows at 20 / longbows at 25 (needs a Knife), sell them, then bank GP. When off: bank the logs.'
         }
     },
     create: () => new OakTreeFletcherSell()

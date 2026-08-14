@@ -1498,7 +1498,7 @@ export default defineBot({
             default: true,
             label: 'Fletch logs into bows',
             group: 'Fletching',
-            help: 'When on: fletch yew logs into bows (needs a Knife). When off: bank the logs instead. Missing Knife in Catherby stops the script.'
+            help: 'When on: fletch yew shortbows at 65 / longbows at 70 (needs a Knife), then bank those. When off: bank the logs. Missing Knife in Catherby stops the script.'
         },
         sellToArhein: {
             type: 'boolean',

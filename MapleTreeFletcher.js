@@ -1237,7 +1237,7 @@ export default defineBot({
             default: true,
             label: 'Fletch logs into bows',
             group: 'Fletching',
-            help: 'When on: fletch maple logs into bows (needs a Knife). When off: bank the logs instead. Missing Knife in Seers Village stops the script.'
+            help: 'When on: fletch maple shortbows at 50 / longbows at 55 (needs a Knife), then bank those. When off: bank the logs. Missing Knife in Seers Village stops the script.'
         }
     },
     create: () => new MapleTreeFletcher()

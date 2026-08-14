@@ -1273,7 +1273,7 @@ export default defineBot({
             default: true,
             label: 'Fletch logs',
             group: 'Fletching',
-            help: 'When on: fletch logs (needs a Knife). When off: bank the logs instead.'
+            help: 'When on: fletch logs into shafts or bows by level (needs a Knife), then bank the bows. When off: bank the logs.'
         },
         regularLogProduct: {
             type: 'string',

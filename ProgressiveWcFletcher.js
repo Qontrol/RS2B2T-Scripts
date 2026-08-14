@@ -708,6 +708,16 @@ class ProgressiveWcFletcher extends LoopingBot {
         return this.settings?.bool('fletchLogs', true) ?? true;
     }
 
+    /** WC gate, plus Fletching gate only when fletching is on. */
+    phaseGateLabel(next, compact = false) {
+        const wc = next === 'willow' ? WILLOW_WC_REQ : OAK_WC_REQ;
+        const fl = next === 'willow' ? WILLOW_FLETCH_REQ : OAK_FLETCH_REQ;
+        if (!this.fletchEnabled()) {
+            return compact ? `WC${wc}` : `WC ${wc}+`;
+        }
+        return compact ? `WC${wc}/Fl${fl}` : `WC ${wc}+ / Fletch ${fl}+`;
+    }
+
     wantShafts() {
         const v = (this.settings?.str('regularLogProduct', REGULAR_BOWS) ?? REGULAR_BOWS).toLowerCase();
         return v.includes('shaft') || v.includes('head');
@@ -773,7 +783,7 @@ class ProgressiveWcFletcher extends LoopingBot {
         } else {
             this.log(
                 `ProgressiveWcFletcher — Falador trees @ ${FALADOR_ANCHOR.x},${FALADOR_ANCHOR.z} ` +
-                    `until WC ${OAK_WC_REQ} + Fletch ${OAK_FLETCH_REQ} (now WC ${Skills.level('woodcutting')} / ` +
+                    `until ${this.phaseGateLabel('oak')} (now WC ${Skills.level('woodcutting')} / ` +
                     `Fletch ${Skills.level('fletching')})`
             );
         }
@@ -811,8 +821,8 @@ class ProgressiveWcFletcher extends LoopingBot {
         }
 
         // Promote Falador → Oak/Willow when skill gates are met.
-        if (this.phase === 'falador' && meetsOakReqs()) {
-            if (meetsWillowReqs()) {
+        if (this.phase === 'falador' && meetsOakReqs(this.fletchEnabled())) {
+            if (meetsWillowReqs(this.fletchEnabled())) {
                 await this.transitionToWillows({ from: 'falador' });
             } else {
                 await this.transitionToOaks();
@@ -820,8 +830,8 @@ class ProgressiveWcFletcher extends LoopingBot {
             return;
         }
 
-        // Promote Oak → Willow when both skills meet the gate.
-        if (this.phase === 'oak' && meetsWillowReqs()) {
+        // Promote Oak → Willow when WC (and fletching, if on) meet the gate.
+        if (this.phase === 'oak' && meetsWillowReqs(this.fletchEnabled())) {
             await this.transitionToWillows({ from: 'oak' });
             return;
         }
@@ -2103,11 +2113,11 @@ class ProgressiveWcFletcher extends LoopingBot {
             packLine = `willow logs ${willowLogCount()}  bows ${willowBowCount()}  trips ${this.bankTrips}`;
             paintColor = '#6ab0cb';
         } else if (this.phase === 'oak') {
-            phaseLabel = `OAK → store → willow @ WC${WILLOW_WC_REQ}/Fl${WILLOW_FLETCH_REQ}`;
+            phaseLabel = `OAK → store → willow @ ${this.phaseGateLabel('willow', true)}`;
             packLine = `oak logs ${oakLogCount()}  bows ${oakBowCount()}  sold ${this.soldBows}`;
             paintColor = '#9ecb6a';
         } else {
-            phaseLabel = `FALADOR → oaks @ WC${OAK_WC_REQ}/Fl${OAK_FLETCH_REQ}`;
+            phaseLabel = `FALADOR → oaks @ ${this.phaseGateLabel('oak', true)}`;
             packLine = `logs ${faladorLogCount()}  bows ${faladorBowCount()}  shafts ${shaftCount()}`;
             paintColor = '#c4a35a';
         }
@@ -2152,14 +2162,14 @@ export default defineBot({
         'draynor'
     ],
     description:
-        `Falador trees until WC ${OAK_WC_REQ}+ / Fletch ${OAK_FLETCH_REQ}+ → oaks (sell bows) until WC ${WILLOW_WC_REQ}+ / Fletch ${WILLOW_FLETCH_REQ}+ → willows at 3087,3235. Optional fletch (regular logs: bows or arrow shafts). Knife required to fletch (bank, else Lumbridge castle spawn).`,
+        `Falador trees until WC ${OAK_WC_REQ}+ → oaks until WC ${WILLOW_WC_REQ}+ → Draynor willows. Banks each trip. If fletching is on: Falador shafts/shortbows@5/longbows@10 until Fletching ${OAK_FLETCH_REQ}, then oak bows (sell in Varrock) until Fletching ${WILLOW_FLETCH_REQ}, then willow bows. Wields Steel axe when Attack allows. Knife required to fletch (bank, else Lumbridge castle spawn).`,
     settingsSchema: {
         fletchLogs: {
             type: 'boolean',
             default: true,
             label: 'Fletch logs',
             group: 'Fletching',
-            help: 'When on: fletch logs (needs a Knife). When off: bank the logs instead.'
+            help: 'When on: fletch by level (needs a Knife), then bank/sell the products. When off: bank the logs and progress on Woodcutting only.'
         },
         regularLogProduct: {
             type: 'string',

@@ -1249,7 +1249,7 @@ export default defineBot({
             default: true,
             label: 'Fletch logs into bows',
             group: 'Fletching',
-            help: 'When on: fletch willow logs into bows (needs a Knife). When off: bank the logs instead.'
+            help: 'When on: fletch willow shortbows at 35 / longbows at 40 (needs a Knife), then bank those. When off: bank the logs.'
         }
     },
     create: () => new WillowTreeFletcher()
