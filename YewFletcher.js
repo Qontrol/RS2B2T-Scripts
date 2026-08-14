@@ -1,8 +1,8 @@
 /**
- * YewFletcher — chop Yews at 2763,3430 (20t leash), fletch yew bows by level, bank.
- * Fletching: Yew shortbow @65 → Yew longbow @70 (bank yew logs below 65).
+ * YewFletcher — chop Yews at 2763,3430 (20t leash), bank.
+ * If fletching is on: yew shortbows at 65 / yew longbows at 70, then bank those.
  * Optional: sell shortbows + longbows to Arhein (Catherby pier), bank GP, return.
- * Knife required (inventory, else bank); stops if none available.
+ * Knife required to fletch (inventory, else bank). Catherby: stops if none available.
  * Completely vibe coded by @.benzyme on Discord via Cursor AI
  * Self-contained ESM for rs2b0t Load local script / Load URL.
  */
@@ -326,8 +326,11 @@ function isKeepTool(name) {
 }
 
 /** True when inventory/equipment still has knife + a usable (or broken) axe. */
-function hasEssentialsAfterBank() {
-    return gearHasKnife() && (gearHasBrokenAxe() || !!gearBestHeldAxe());
+function hasEssentialsAfterBank(needKnife = true) {
+    if (needKnife && !gearHasKnife()) {
+        return false;
+    }
+    return gearHasBrokenAxe() || !!gearBestHeldAxe();
 }
 
 function normName(name) {
@@ -372,8 +375,8 @@ function isYewLog(name) {
 }
 
 /** Current fletch product for the make-menu + banking phase. */
-function fletchPlan(level) {
-    if (level < SHORTBOW_LEVEL) {
+function fletchPlan(level, fletchOn = true) {
+    if (!fletchOn || level < SHORTBOW_LEVEL) {
         return {
             id: 'logs',
             menuMatch: '',
@@ -524,6 +527,18 @@ class YewFletcher extends LoopingBot {
         return this.settings?.bool('sellToArhein', true) ?? true;
     }
 
+    fletchEnabled() {
+        return this.settings?.bool('fletchLogs', true) ?? true;
+    }
+
+    planAt(level) {
+        return fletchPlan(level, this.fletchEnabled());
+    }
+
+    currentPlan() {
+        return this.planAt(Skills.level('fletching'));
+    }
+
     async onStart() {
         await Execution.delayUntil(() => Game.ingame() && Game.tile() !== null, 0);
         Traversal.preload();
@@ -532,13 +547,13 @@ class YewFletcher extends LoopingBot {
         this.wcXpAtStart = Skills.xp('woodcutting');
         this.fletchXpAtStart = Skills.xp('fletching');
         this.totalGpEarned = 0;
-        this.planId = fletchPlan(Skills.level('fletching')).id;
+        this.planId = this.currentPlan().id;
         this.gearReady = false;
         this.needSteelBuy = false;
 
         this.on('skill.level', e => {
             if (e.name === 'fletching') {
-                const plan = fletchPlan(e.level);
+                const plan = this.planAt(e.level);
                 this.log(`fletching ${e.previous} → ${e.level} — now making ${plan.label}`);
                 this.planId = plan.id;
             }
@@ -550,12 +565,14 @@ class YewFletcher extends LoopingBot {
             }
         });
 
-        const plan = fletchPlan(Skills.level('fletching'));
+        const plan = this.currentPlan();
         const sellOn = this.sellToArhein();
         this.log(
             `YewFletcher @ ${ANCHOR.x},${ANCHOR.z} (leash ${LEASH}) — ` +
-                `fletching ${Skills.level('fletching')} → ${plan.label}` +
-                (sellOn ? ' → sell @ Arhein' : ' → bank bows')
+                (this.fletchEnabled()
+                    ? `fletching ${Skills.level('fletching')} → ${plan.label}` +
+                      (sellOn ? ' → sell @ Arhein' : ' → bank bows')
+                    : 'banking logs (fletch off)')
         );
         this.status = 'ready';
     }
@@ -590,11 +607,13 @@ class YewFletcher extends LoopingBot {
             return;
         }
 
-        const plan = fletchPlan(Skills.level('fletching'));
+        const plan = this.currentPlan();
         this.planId = plan.id;
 
         if (ChatDialog.isMakeMenu()) {
-            await this.chooseMakeProduct(plan);
+            if (plan.fletch) {
+                await this.chooseMakeProduct(plan);
+            }
             return;
         }
 
@@ -815,7 +834,7 @@ class YewFletcher extends LoopingBot {
             if (held && !Equipment.contains(held) && canWieldTool(held, Skills.level('attack'))) {
                 await Equipment.equip(held);
             }
-            if (!gearBestHeldAxe() || !gearHasKnife()) {
+            if (!gearBestHeldAxe() || (this.fletchEnabled() && !gearHasKnife())) {
                 this.gearReady = false;
             }
         } else {
@@ -833,6 +852,11 @@ class YewFletcher extends LoopingBot {
         // Broken axe always wins — take it to Bob before anything else.
         if (gearHasBrokenAxe() || (Bank.isOpen() && (Bank.count(GEAR_BROKEN_AXE) || 0) > 0)) {
             return await this.repairBrokenAxeAtBob();
+        }
+
+        if (this.gearReady && this.fletchEnabled() && !gearHasKnife()) {
+            this.log('gear: Knife missing — checking nearest bank');
+            this.gearReady = false;
         }
 
         if (this.gearReady && !this.needSteelBuy) {
@@ -901,7 +925,7 @@ class YewFletcher extends LoopingBot {
             await Execution.delayTicks(1);
         }
 
-        if (!gearHasKnife()) {
+        if (this.fletchEnabled() && !gearHasKnife()) {
             if ((Bank.count('Knife') || 0) > 0) {
                 this.log('gear: withdrawing Knife');
                 await Bank.withdrawX('Knife', 1);
@@ -946,7 +970,7 @@ class YewFletcher extends LoopingBot {
             this.log(`gear: keeping ${held} in pack (Attack too low to wield)`);
         }
 
-        if (!gearHasKnife()) {
+        if (this.fletchEnabled() && !gearHasKnife()) {
             this.stopNoKnife('gear');
             return true;
         }
@@ -969,12 +993,12 @@ class YewFletcher extends LoopingBot {
         return true;
     }
 
-    /** No Knife in inventory or bank — stop rather than walk to Lumbridge. */
+    /** Fletch on, no Knife in inventory or bank — stop (Catherby is too far from Lumbridge). */
     stopNoKnife(context) {
         this.status = 'no knife — stopped';
         this.log(
             `${context}: no Knife in inventory or bank — stopping ` +
-                '(withdraw a Knife, then restart)'
+                '(Catherby will not walk to Lumbridge; withdraw a Knife, then restart)'
         );
         stopScript();
     }
@@ -1278,12 +1302,13 @@ class YewFletcher extends LoopingBot {
      * @returns {Promise<boolean>} false if Knife is missing from bank (script stops)
      */
     async restockEssentialsFromOpenBank() {
+        const needKnife = this.fletchEnabled();
         if (!Bank.isOpen()) {
-            return hasEssentialsAfterBank();
+            return hasEssentialsAfterBank(needKnife);
         }
         await Execution.delayUntil(() => Bank.loaded() || !Bank.isOpen(), 3000);
         if (!Bank.isOpen()) {
-            return hasEssentialsAfterBank();
+            return hasEssentialsAfterBank(needKnife);
         }
 
         if ((Bank.count(GEAR_BROKEN_AXE) || 0) > 0 && !gearHasBrokenAxe()) {
@@ -1292,7 +1317,7 @@ class YewFletcher extends LoopingBot {
             await Execution.delayTicks(1);
         }
 
-        if (!gearHasKnife()) {
+        if (this.fletchEnabled() && !gearHasKnife()) {
             if ((Bank.count('Knife') || 0) > 0) {
                 this.log('gear: withdrawing Knife');
                 await Bank.withdrawX('Knife', 1);
@@ -1315,7 +1340,7 @@ class YewFletcher extends LoopingBot {
             }
         }
 
-        return hasEssentialsAfterBank();
+        return hasEssentialsAfterBank(needKnife);
     }
 
     /** Sell shortbows + longbows at Arhein, bank coins at Catherby, return to yews. */
@@ -1427,7 +1452,7 @@ class YewFletcher extends LoopingBot {
     }
 
     onPaint(ctx) {
-        const plan = fletchPlan(Skills.level('fletching'));
+        const plan = this.currentPlan();
         const sellOn = this.sellToArhein();
         const elapsed = Date.now() - this.startedAt;
         const hrs = elapsed / 3_600_000;
@@ -1462,12 +1487,19 @@ class YewFletcher extends LoopingBot {
 
 export default defineBot({
     name: SCRIPT_NAME,
-    version: '1.1.0',
+    version: '1.2.0',
     category: 'Fletching',
     tags: ['woodcutting', 'fletching', 'yew', 'shortbow', 'longbow', 'arhein', 'sell'],
     description:
-        'Chop Yews at 2763,3430 (20t leash). Bank logs <65 → Yew shortbow @65 → Yew longbow @70. Optional: sell both bow types to Arhein → bank GP at Catherby → return. Stops if no Knife.',
+        'Chops yews between Catherby and Seers (2763,3430). Banks logs. If fletching is on: yew shortbows at 65 / yew longbows at 70 — then banks those. Optional: sell bows to Arhein, bank GP, return. Stops if fletching is on and there is no knife.',
     settingsSchema: {
+        fletchLogs: {
+            type: 'boolean',
+            default: true,
+            label: 'Fletch logs into bows',
+            group: 'Fletching',
+            help: 'When on: fletch yew logs into bows (needs a Knife). When off: bank the logs instead. Missing Knife in Catherby stops the script.'
+        },
         sellToArhein: {
             type: 'boolean',
             default: true,

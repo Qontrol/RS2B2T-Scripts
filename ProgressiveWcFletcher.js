@@ -1,8 +1,9 @@
 /**
- * ProgressiveWcFletcher — Falador trees → Oaks (sell) → Willows (bank bows).
- * Phase 1: FaladorTreeFletcher (shafts / shortbow / longbow + bank).
- * Phase 2: OakTreeFletcherSell (oak short/longbow → Varrock General → bank GP).
- * Phase 3: WillowTreeFletcher (willow short/longbow + bank) @ Draynor.
+ * ProgressiveWcFletcher — Falador trees → Oaks (sell) → Willows (bank).
+ * Phase 1: Falador trees until WC 15 (if fletching is on: also Fletching 20).
+ * Phase 2: Oaks until WC 30 (if fletching is on: also Fletching 35; sell bows at Varrock General).
+ * Phase 3: Willows at Draynor (if fletching is on: willow bows, then bank).
+ * Knife required to fletch; missing knife → nearest bank, else Lumbridge castle spawn.
  * Completely vibe coded by @.benzyme on Discord via Cursor AI
  * Self-contained ESM for rs2b0t Load local script / Load URL.
  */
@@ -124,16 +125,18 @@ async function dismissWelcomeScreen() {
     return !isWelcomeModalOpen();
 }
 
-/** Switch to oaks only when both are met. */
+/** Switch to oaks at WC 15. If fletching is on, also requires Fletching 20. */
 const OAK_WC_REQ = 15;
 const OAK_FLETCH_REQ = 20;
 
-/** Switch to willows only when both are met. */
+/** Switch to willows at WC 30. If fletching is on, also requires Fletching 35. */
 const WILLOW_WC_REQ = 30;
 const WILLOW_FLETCH_REQ = 35;
 
-/** Lumbridge knife spawn (behind Bob's) + Bob steel axe / repair. */
+/** Lumbridge knife spawn (castle / behind Bob's) + Bob steel axe / repair. */
 const GEAR_KNIFE_SPAWN = new Tile(3224, 3202, 0);
+const REGULAR_BOWS = 'bows';
+const REGULAR_SHAFTS = 'arrow shafts';
 const GEAR_BOB_STAND = new Tile(3231, 3203, 0);
 const GEAR_STEEL_AXE = 'Steel axe';
 const GEAR_STEEL_COST = 250;
@@ -318,36 +321,41 @@ function normName(name) {
     return (name ?? '').toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
-function meetsOakReqs() {
-    return Skills.level('woodcutting') >= OAK_WC_REQ && Skills.level('fletching') >= OAK_FLETCH_REQ;
+function meetsOakReqs(fletchOn = true) {
+    if (Skills.level('woodcutting') < OAK_WC_REQ) {
+        return false;
+    }
+    return !fletchOn || Skills.level('fletching') >= OAK_FLETCH_REQ;
 }
 
-function meetsWillowReqs() {
-    return (
-        Skills.level('woodcutting') >= WILLOW_WC_REQ &&
-        Skills.level('fletching') >= WILLOW_FLETCH_REQ
-    );
+function meetsWillowReqs(fletchOn = true) {
+    if (Skills.level('woodcutting') < WILLOW_WC_REQ) {
+        return false;
+    }
+    return !fletchOn || Skills.level('fletching') >= WILLOW_FLETCH_REQ;
 }
 
 /** Highest phase the account currently qualifies for. */
-function targetPhase() {
-    if (meetsWillowReqs()) {
+function targetPhase(fletchOn = true) {
+    if (meetsWillowReqs(fletchOn)) {
         return 'willow';
     }
-    if (meetsOakReqs()) {
+    if (meetsOakReqs(fletchOn)) {
         return 'oak';
     }
     return 'falador';
 }
 
-function planForPhase(phase, flvl) {
+function planForPhase(phase, flvl, opts = {}) {
+    const fletchOn = opts.fletchOn !== false;
+    const shafts = !!opts.shafts;
     if (phase === 'willow') {
-        return willowPlan(flvl);
+        return willowPlan(flvl, fletchOn);
     }
     if (phase === 'oak') {
-        return oakPlan(flvl);
+        return oakPlan(flvl, fletchOn);
     }
-    return faladorPlan(flvl);
+    return faladorPlan(flvl, fletchOn, shafts);
 }
 
 /* ── Falador product classifiers ── */
@@ -434,18 +442,21 @@ function isCoins(name) {
     return normName(name) === 'coins';
 }
 
-function faladorPlan(level) {
-    if (level < FALADOR_SHORT_LVL) {
-        return { id: 'shafts', menuMatch: 'shaft', label: 'Arrow shafts', bank: false };
+function faladorPlan(level, fletchOn = true, shafts = false) {
+    if (!fletchOn) {
+        return { id: 'logs', menuMatch: '', label: 'Logs (bank)', bank: true, fletch: false };
+    }
+    if (shafts || level < FALADOR_SHORT_LVL) {
+        return { id: 'shafts', menuMatch: 'shaft', label: 'Arrow shafts', bank: false, fletch: true };
     }
     if (level < FALADOR_LONG_LVL) {
-        return { id: 'shortbow', menuMatch: 'short', label: 'Shortbow', bank: true };
+        return { id: 'shortbow', menuMatch: 'short', label: 'Shortbow', bank: true, fletch: true };
     }
-    return { id: 'longbow', menuMatch: 'long', label: 'Longbow', bank: true };
+    return { id: 'longbow', menuMatch: 'long', label: 'Longbow', bank: true, fletch: true };
 }
 
-function oakPlan(level) {
-    if (level < OAK_SHORT_LVL) {
+function oakPlan(level, fletchOn = true) {
+    if (!fletchOn || level < OAK_SHORT_LVL) {
         return {
             id: 'oak-logs',
             menuMatch: '',
@@ -472,8 +483,8 @@ function oakPlan(level) {
     };
 }
 
-function willowPlan(level) {
-    if (level < WILLOW_SHORT_LVL) {
+function willowPlan(level, fletchOn = true) {
+    if (!fletchOn || level < WILLOW_SHORT_LVL) {
         return {
             id: 'willow-logs',
             menuMatch: '',
@@ -525,7 +536,13 @@ function matchMakeProduct(products, menuMatch, woodHint) {
             pool = plain;
         }
     }
-    return pool.find(p => (p ?? '').toLowerCase().includes(want)) ?? null;
+    return pool.find(p => {
+        const n = (p ?? '').toLowerCase();
+        if (want === 'shaft') {
+            return n.includes('shaft') || n.includes('arrow head') || n.includes('arrowhead');
+        }
+        return n.includes(want);
+    }) ?? null;
 }
 
 function knifeItem() {
@@ -604,13 +621,16 @@ function willowHasBankables() {
 }
 
 function needsFaladorBank(plan) {
-    if (faladorLogCount() > 0) {
+    if (plan.fletch && faladorLogCount() > 0) {
         return false;
+    }
+    if (!plan.fletch && faladorLogCount() > 0 && Inventory.isFull()) {
+        return true;
     }
     if (plan.bank && faladorBowCount() > 0) {
         return true;
     }
-    return Skills.level('fletching') >= FALADOR_SHORT_LVL && shaftCount() > 0;
+    return plan.id !== 'shafts' && shaftCount() > 0;
 }
 
 function needsOakSell(plan) {
@@ -684,6 +704,27 @@ class ProgressiveWcFletcher extends LoopingBot {
     /** Log count snapshot for stuck detection. */
     fletchLogMark = -1;
 
+    fletchEnabled() {
+        return this.settings?.bool('fletchLogs', true) ?? true;
+    }
+
+    wantShafts() {
+        const v = (this.settings?.str('regularLogProduct', REGULAR_BOWS) ?? REGULAR_BOWS).toLowerCase();
+        return v.includes('shaft') || v.includes('head');
+    }
+
+    planOpts() {
+        return { fletchOn: this.fletchEnabled(), shafts: this.wantShafts() };
+    }
+
+    planAt(phase, level) {
+        return planForPhase(phase, level, this.planOpts());
+    }
+
+    currentPlan() {
+        return this.planAt(this.phase, Skills.level('fletching'));
+    }
+
     async onStart() {
         await Execution.delayUntil(() => Game.ingame() && Game.tile() !== null, 0);
         Traversal.preload();
@@ -692,8 +733,8 @@ class ProgressiveWcFletcher extends LoopingBot {
         this.wcXpAtStart = Skills.xp('woodcutting');
         this.fletchXpAtStart = Skills.xp('fletching');
         this.totalGpEarned = 0;
-        this.phase = targetPhase();
-        this.planId = planForPhase(this.phase, Skills.level('fletching')).id;
+        this.phase = targetPhase(this.fletchEnabled());
+        this.planId = this.currentPlan().id;
         this.gearReady = false;
         this.needSteelBuy = false;
         this.fletchActionAt = 0;
@@ -706,15 +747,15 @@ class ProgressiveWcFletcher extends LoopingBot {
             if (e.name === 'woodcutting' && e.previous < 6 && e.level >= 6 && !gearHasSteelOrBetter()) {
                 this.needSteelBuy = true;
             }
-            if (this.phase === 'falador' && meetsOakReqs()) {
-                const next = meetsWillowReqs() ? 'willows' : 'oaks';
+            if (this.phase === 'falador' && meetsOakReqs(this.fletchEnabled())) {
+                const next = meetsWillowReqs(this.fletchEnabled()) ? 'willows' : 'oaks';
                 this.log(
-                    `reqs met (WC ${OAK_WC_REQ}+ / Fletch ${OAK_FLETCH_REQ}+) — will switch to ${next} after clearing Falador pack`
+                    `reqs met (${this.phaseGateLabel('oak')}) — will switch to ${next} after clearing Falador pack`
                 );
             }
-            if (this.phase === 'oak' && meetsWillowReqs()) {
+            if (this.phase === 'oak' && meetsWillowReqs(this.fletchEnabled())) {
                 this.log(
-                    `reqs met (WC ${WILLOW_WC_REQ}+ / Fletch ${WILLOW_FLETCH_REQ}+) — will switch to willows after clearing oak pack`
+                    `reqs met (${this.phaseGateLabel('willow')}) — will switch to willows after clearing oak pack`
                 );
             }
         });
@@ -840,7 +881,7 @@ class ProgressiveWcFletcher extends LoopingBot {
             log: m => this.log(`  ${m}`)
         });
         this.phase = 'oak';
-        this.planId = oakPlan(Skills.level('fletching')).id;
+        this.planId = this.currentPlan().id;
         this.status = 'oaks ready';
         this.log('now on oak progression (sell bows → bank GP)');
     }
@@ -898,7 +939,7 @@ class ProgressiveWcFletcher extends LoopingBot {
             log: m => this.log(`  ${m}`)
         });
         this.phase = 'willow';
-        this.planId = willowPlan(Skills.level('fletching')).id;
+        this.planId = this.currentPlan().id;
         this.status = 'willows ready';
         this.log('now on willow progression (fletch bows → bank)');
     }
@@ -906,20 +947,23 @@ class ProgressiveWcFletcher extends LoopingBot {
     /* ═══════════ Phase 1: Falador ═══════════ */
 
     async loopFalador() {
-        const plan = faladorPlan(Skills.level('fletching'));
+        const plan = this.planAt('falador', Skills.level('fletching'));
         this.planId = plan.id;
 
         if (ChatDialog.isMakeMenu()) {
-            await this.chooseMakeProduct(plan, 'plain', () => faladorLogCount());
+            if (plan.fletch) {
+                await this.chooseMakeProduct(plan, 'plain', () => faladorLogCount());
+            }
             return;
         }
 
-        if (faladorLogCount() > 0 && Inventory.isFull()) {
+        if (plan.fletch && faladorLogCount() > 0 && Inventory.isFull()) {
             await this.fletchLogs(plan, 'plain', faladorLogCount, n => isFaladorLog(n));
             return;
         }
 
         if (
+            plan.fletch &&
             faladorLogCount() > 0 &&
             Game.animating() &&
             faladorBowCount() === 0 &&
@@ -931,6 +975,11 @@ class ProgressiveWcFletcher extends LoopingBot {
         }
 
         if (needsFaladorBank(plan)) {
+            await this.bankFaladorAndReturn();
+            return;
+        }
+
+        if (!plan.fletch && Inventory.isFull() && faladorLogCount() > 0) {
             await this.bankFaladorAndReturn();
             return;
         }
@@ -968,6 +1017,7 @@ class ProgressiveWcFletcher extends LoopingBot {
     }
 
     async bankFaladorAndReturn() {
+        const plan = this.planAt('falador', Skills.level('fletching'));
         const flvl = Skills.level('fletching');
         const bows = faladorBowCount();
         const shorts = countPred(isFaladorShortbow);
@@ -977,7 +1027,8 @@ class ProgressiveWcFletcher extends LoopingBot {
             `banking` +
                 (shorts ? ` ${shorts} Shortbow` : '') +
                 (bows - shorts > 0 ? ` ${bows - shorts} Longbow` : '') +
-                (shafts && flvl >= FALADOR_SHORT_LVL ? ` ${shafts} arrow shafts` : '') +
+                (shafts && plan.id !== 'shafts' ? ` ${shafts} arrow shafts` : '') +
+                (!plan.fletch && faladorLogCount() ? ` ${faladorLogCount()} logs` : '') +
                 ` (fletching ${flvl})`
         );
 
@@ -987,7 +1038,7 @@ class ProgressiveWcFletcher extends LoopingBot {
                     return false;
                 }
                 if (isShaft(name)) {
-                    return flvl >= FALADOR_SHORT_LVL;
+                    return plan.id !== 'shafts';
                 }
                 if (isFaladorBow(name)) {
                     return true;
@@ -998,6 +1049,14 @@ class ProgressiveWcFletcher extends LoopingBot {
                 if ((Bank.count(GEAR_BROKEN_AXE) || 0) > 0 && !gearHasBrokenAxe()) {
                     this.log('gear: withdrawing Broken axe');
                     await Bank.withdrawX(GEAR_BROKEN_AXE, 1);
+                }
+                if (this.fletchEnabled() && !gearHasKnife()) {
+                    if ((Bank.count('Knife') || 0) > 0) {
+                        this.log('gear: withdrawing Knife');
+                        await Bank.withdrawX('Knife', 1);
+                    } else {
+                        this.gearReady = false;
+                    }
                 }
                 this.maybeQueueSteelBuy();
             },
@@ -1012,11 +1071,13 @@ class ProgressiveWcFletcher extends LoopingBot {
     /* ═══════════ Phase 2: Oaks + sell ═══════════ */
 
     async loopOak() {
-        const plan = oakPlan(Skills.level('fletching'));
+        const plan = this.planAt('oak', Skills.level('fletching'));
         this.planId = plan.id;
 
         if (ChatDialog.isMakeMenu()) {
-            await this.chooseMakeProduct(plan, 'oak', () => oakLogCount());
+            if (plan.fletch) {
+                await this.chooseMakeProduct(plan, 'oak', () => oakLogCount());
+            }
             return;
         }
 
@@ -1184,11 +1245,13 @@ class ProgressiveWcFletcher extends LoopingBot {
     /* ═══════════ Phase 3: Willows + bank ═══════════ */
 
     async loopWillow() {
-        const plan = willowPlan(Skills.level('fletching'));
+        const plan = this.planAt('willow', Skills.level('fletching'));
         this.planId = plan.id;
 
         if (ChatDialog.isMakeMenu()) {
-            await this.chooseMakeProduct(plan, 'willow', () => willowLogCount());
+            if (plan.fletch) {
+                await this.chooseMakeProduct(plan, 'willow', () => willowLogCount());
+            }
             return;
         }
 
@@ -1422,7 +1485,7 @@ class ProgressiveWcFletcher extends LoopingBot {
             if (held && !Equipment.contains(held) && canWieldTool(held, Skills.level('attack'))) {
                 await Equipment.equip(held);
             }
-            if (!gearBestHeldAxe() || !gearHasKnife()) {
+            if (!gearBestHeldAxe() || (this.fletchEnabled() && !gearHasKnife())) {
                 this.gearReady = false;
             }
         } else {
@@ -1445,6 +1508,11 @@ class ProgressiveWcFletcher extends LoopingBot {
         // Wield best held axe (Steel+) once Attack is high enough.
         if (await this.ensureBestAxeWielded()) {
             return true;
+        }
+
+        if (this.gearReady && this.fletchEnabled() && !gearHasKnife()) {
+            this.log('gear: Knife missing — checking nearest bank');
+            this.gearReady = false;
         }
 
         if (this.gearReady && !this.needSteelBuy) {
@@ -1536,13 +1604,13 @@ class ProgressiveWcFletcher extends LoopingBot {
             await Execution.delayTicks(1);
         }
 
-        if (!gearHasKnife()) {
+        if (this.fletchEnabled() && !gearHasKnife()) {
             if ((Bank.count('Knife') || 0) > 0) {
                 this.log('gear: withdrawing Knife');
                 await Bank.withdrawX('Knife', 1);
                 await Execution.delayTicks(1);
             } else {
-                this.log('gear: no Knife in bank — will pick up behind Bob');
+                this.log('gear: no Knife in bank — walking to Lumbridge castle spawn');
             }
         }
 
@@ -1579,7 +1647,7 @@ class ProgressiveWcFletcher extends LoopingBot {
             this.log(`gear: keeping ${held} in pack (Attack too low to wield)`);
         }
 
-        if (!gearHasKnife()) {
+        if (this.fletchEnabled() && !gearHasKnife()) {
             return await this.pickupLumbridgeKnife();
         }
 
@@ -1603,7 +1671,7 @@ class ProgressiveWcFletcher extends LoopingBot {
 
     async pickupLumbridgeKnife() {
         this.status = 'gear: knife spawn';
-        this.log('gear: walking to Lumbridge knife spawn (behind Bob)');
+        this.log('gear: walking to Lumbridge knife spawn (beside castle / behind Bob)');
         await Traversal.walkResilient(GEAR_KNIFE_SPAWN, {
             radius: 1,
             log: m => this.log(`  ${m}`)
@@ -1880,10 +1948,7 @@ class ProgressiveWcFletcher extends LoopingBot {
     }
 
     async fletchLogs(plan, woodHint, logCountFn, logPred) {
-        if ((woodHint === 'oak' || woodHint === 'willow') && plan.fletch === false) {
-            return;
-        }
-        if (logCountFn() === 0) {
+        if (plan.fletch === false || logCountFn() === 0) {
             return;
         }
 
@@ -1899,8 +1964,9 @@ class ProgressiveWcFletcher extends LoopingBot {
         const knife = knifeItem();
         const log = lastLogMatching(logPred);
         if (!knife) {
-            this.log('WARNING: no Knife in inventory — cannot fletch');
-            await Execution.delayTicks(5);
+            this.gearReady = false;
+            this.log('WARNING: no Knife in inventory — checking nearest bank');
+            await Execution.delayTicks(2);
             return;
         }
         if (!log) {
@@ -1940,7 +2006,7 @@ class ProgressiveWcFletcher extends LoopingBot {
     }
 
     async chooseMakeProduct(plan, woodHint, logCountFn) {
-        if ((woodHint === 'oak' || woodHint === 'willow') && plan.fletch === false) {
+        if (plan.fletch === false) {
             return;
         }
         if (!plan.menuMatch) {
@@ -2028,7 +2094,7 @@ class ProgressiveWcFletcher extends LoopingBot {
         const wc = Skills.level('woodcutting');
         const fl = Skills.level('fletching');
 
-        const plan = planForPhase(this.phase, fl);
+        const plan = this.currentPlan();
         let phaseLabel;
         let packLine;
         let paintColor;
@@ -2072,7 +2138,7 @@ class ProgressiveWcFletcher extends LoopingBot {
 
 export default defineBot({
     name: SCRIPT_NAME,
-    version: '1.2.0',
+    version: '1.3.0',
     category: 'Fletching',
     tags: [
         'woodcutting',
@@ -2086,6 +2152,24 @@ export default defineBot({
         'draynor'
     ],
     description:
-        `Falador trees until WC ${OAK_WC_REQ}+ / Fletch ${OAK_FLETCH_REQ}+ → oaks (sell bows) until WC ${WILLOW_WC_REQ}+ / Fletch ${WILLOW_FLETCH_REQ}+ → willows at 3087,3235 (bank bows). Wields Steel axe when Attack allows.`,
+        `Falador trees until WC ${OAK_WC_REQ}+ / Fletch ${OAK_FLETCH_REQ}+ → oaks (sell bows) until WC ${WILLOW_WC_REQ}+ / Fletch ${WILLOW_FLETCH_REQ}+ → willows at 3087,3235. Optional fletch (regular logs: bows or arrow shafts). Knife required to fletch (bank, else Lumbridge castle spawn).`,
+    settingsSchema: {
+        fletchLogs: {
+            type: 'boolean',
+            default: true,
+            label: 'Fletch logs',
+            group: 'Fletching',
+            help: 'When on: fletch logs (needs a Knife). When off: bank the logs instead.'
+        },
+        regularLogProduct: {
+            type: 'string',
+            default: REGULAR_BOWS,
+            options: [REGULAR_BOWS, REGULAR_SHAFTS],
+            label: 'Regular logs',
+            group: 'Fletching',
+            showIf: { key: 'fletchLogs', anyOf: [true] },
+            help: 'When fletching regular logs in Falador: short/longbows by level, or arrow shafts (heads).'
+        }
+    },
     create: () => new ProgressiveWcFletcher()
 });

@@ -1,5 +1,7 @@
 /**
- * FaladorTreeFletcher — chop regular trees at 2953,3407, fletch by level, bank bows/shafts.
+ * FaladorTreeFletcher — chop regular trees at 2953,3407, bank.
+ * If fletching is on: arrow shafts, or shortbows at 5 / longbows at 10, then bank bows.
+ * Knife required to fletch; missing knife → nearest bank, else Lumbridge castle spawn.
  * Completely vibe coded by @.benzyme on Discord via Cursor AI
  * Self-contained ESM for rs2b0t Load local script / Load URL.
  */
@@ -131,8 +133,10 @@ const LOG_NAME = 'Logs';
 const SHORTBOW_LEVEL = 5;
 const LONGBOW_LEVEL = 10;
 
-/** Lumbridge knife spawn (behind Bob's) + Bob steel axe / repair. */
+/** Lumbridge knife spawn (castle / behind Bob's) + Bob steel axe / repair. */
 const GEAR_KNIFE_SPAWN = new Tile(3224, 3202, 0);
+const REGULAR_BOWS = 'bows';
+const REGULAR_SHAFTS = 'arrow shafts';
 const GEAR_BOB_STAND = new Tile(3231, 3203, 0);
 const GEAR_STEEL_AXE = 'Steel axe';
 const GEAR_STEEL_COST = 250;
@@ -329,13 +333,23 @@ function isShaft(name) {
 }
 
 /** Current fletch product for the make-menu + banking phase. */
-function fletchPlan(level) {
-    if (level < SHORTBOW_LEVEL) {
+function fletchPlan(level, fletchOn = true, shafts = false) {
+    if (!fletchOn) {
+        return {
+            id: 'logs',
+            menuMatch: '',
+            label: 'Logs (bank)',
+            bank: true,
+            fletch: false
+        };
+    }
+    if (shafts || level < SHORTBOW_LEVEL) {
         return {
             id: 'shafts',
             menuMatch: 'shaft',
             label: 'Arrow shafts',
-            bank: false
+            bank: false,
+            fletch: true
         };
     }
     if (level < LONGBOW_LEVEL) {
@@ -343,19 +357,29 @@ function fletchPlan(level) {
             id: 'shortbow',
             menuMatch: 'short',
             label: 'Shortbow',
-            bank: true
+            bank: true,
+            fletch: true
         };
     }
     return {
         id: 'longbow',
         menuMatch: 'long',
         label: 'Longbow',
-        bank: true
+        bank: true,
+        fletch: true
     };
 }
 
 function matchMakeProduct(products, menuMatch) {
     const want = menuMatch.toLowerCase();
+    if (want === 'shaft') {
+        return (
+            products.find(p => {
+                const n = (p ?? '').toLowerCase();
+                return n.includes('shaft') || n.includes('arrow head') || n.includes('arrowhead');
+            }) ?? null
+        );
+    }
     return products.find(p => (p ?? '').toLowerCase().includes(want)) ?? null;
 }
 
@@ -397,15 +421,18 @@ function shaftCount() {
         .reduce((n, i) => n + Math.max(1, i.count), 0);
 }
 
-/** Bank when we have bows to deposit, or leftover shafts once fletching ≥ 5. */
+/** Bank when we have bows/logs to deposit, or leftover shafts once not making shafts. */
 function needsBankTrip(plan) {
-    if (logCount() > 0) {
+    if (plan.fletch && logCount() > 0) {
         return false;
+    }
+    if (!plan.fletch && logCount() > 0 && Inventory.isFull()) {
+        return true;
     }
     if (plan.bank && bowCount() > 0) {
         return true;
     }
-    return Skills.level('fletching') >= SHORTBOW_LEVEL && shaftCount() > 0;
+    return plan.id !== 'shafts' && shaftCount() > 0;
 }
 
 class FaladorTreeFletcher extends LoopingBot {
@@ -420,6 +447,23 @@ class FaladorTreeFletcher extends LoopingBot {
     gearReady = false;
     needSteelBuy = false;
 
+    fletchEnabled() {
+        return this.settings?.bool('fletchLogs', true) ?? true;
+    }
+
+    wantShafts() {
+        const v = (this.settings?.str('regularLogProduct', REGULAR_BOWS) ?? REGULAR_BOWS).toLowerCase();
+        return v.includes('shaft') || v.includes('head');
+    }
+
+    planAt(level) {
+        return fletchPlan(level, this.fletchEnabled(), this.wantShafts());
+    }
+
+    currentPlan() {
+        return this.planAt(Skills.level('fletching'));
+    }
+
     async onStart() {
         await Execution.delayUntil(() => Game.ingame() && Game.tile() !== null, 0);
         Traversal.preload();
@@ -427,13 +471,13 @@ class FaladorTreeFletcher extends LoopingBot {
         this.startedAt = Date.now();
         this.wcXpAtStart = Skills.xp('woodcutting');
         this.fletchXpAtStart = Skills.xp('fletching');
-        this.planId = fletchPlan(Skills.level('fletching')).id;
+        this.planId = this.currentPlan().id;
         this.gearReady = false;
         this.needSteelBuy = false;
 
         this.on('skill.level', e => {
             if (e.name === 'fletching') {
-                const plan = fletchPlan(e.level);
+                const plan = this.planAt(e.level);
                 this.log(`fletching ${e.previous} → ${e.level} — now making ${plan.label}`);
                 this.planId = plan.id;
             }
@@ -445,10 +489,12 @@ class FaladorTreeFletcher extends LoopingBot {
             }
         });
 
-        const plan = fletchPlan(Skills.level('fletching'));
+        const plan = this.currentPlan();
         this.log(
             `FaladorTreeFletcher @ ${ANCHOR.x},${ANCHOR.z} (leash ${LEASH}) — ` +
-                `fletching ${Skills.level('fletching')} → ${plan.label}`
+                (this.fletchEnabled()
+                    ? `fletching ${Skills.level('fletching')} → ${plan.label}`
+                    : `banking logs (fletch off)`)
         );
         this.status = 'ready';
     }
@@ -483,26 +529,39 @@ class FaladorTreeFletcher extends LoopingBot {
             return;
         }
 
-        const plan = fletchPlan(Skills.level('fletching'));
+        const plan = this.currentPlan();
         this.planId = plan.id;
 
         if (ChatDialog.isMakeMenu()) {
-            await this.chooseMakeProduct(plan);
+            if (plan.fletch) {
+                await this.chooseMakeProduct(plan);
+            }
             return;
         }
 
-        if (logCount() > 0 && Inventory.isFull()) {
+        if (plan.fletch && logCount() > 0 && Inventory.isFull()) {
             await this.fletchLogs(plan);
             return;
         }
 
-        if (logCount() > 0 && Game.animating() && bowCount() === 0 && !this.findTreeWithin(2)) {
+        if (
+            plan.fletch &&
+            logCount() > 0 &&
+            Game.animating() &&
+            bowCount() === 0 &&
+            !this.findTreeWithin(2)
+        ) {
             this.status = `fletching ${plan.label}`;
             await Execution.delayTicks(1);
             return;
         }
 
         if (needsBankTrip(plan)) {
+            await this.bankProductsAndReturn();
+            return;
+        }
+
+        if (!plan.fletch && Inventory.isFull() && logCount() > 0) {
             await this.bankProductsAndReturn();
             return;
         }
@@ -680,8 +739,8 @@ class FaladorTreeFletcher extends LoopingBot {
             if (held && !Equipment.contains(held) && canWieldTool(held, Skills.level('attack'))) {
                 await Equipment.equip(held);
             }
-            // Re-bootstrap if we somehow lost knife/axe readiness mid-repair.
-            if (!gearBestHeldAxe() || !gearHasKnife()) {
+            // Re-bootstrap if we somehow lost axe (or knife when fletching) mid-repair.
+            if (!gearBestHeldAxe() || (this.fletchEnabled() && !gearHasKnife())) {
                 this.gearReady = false;
             }
         } else {
@@ -699,6 +758,11 @@ class FaladorTreeFletcher extends LoopingBot {
         // Broken axe always wins — take it to Bob before anything else.
         if (gearHasBrokenAxe() || (Bank.isOpen() && (Bank.count(GEAR_BROKEN_AXE) || 0) > 0)) {
             return await this.repairBrokenAxeAtBob();
+        }
+
+        if (this.gearReady && this.fletchEnabled() && !gearHasKnife()) {
+            this.log('gear: Knife missing — checking nearest bank');
+            this.gearReady = false;
         }
 
         if (this.gearReady && !this.needSteelBuy) {
@@ -767,13 +831,13 @@ class FaladorTreeFletcher extends LoopingBot {
             await Execution.delayTicks(1);
         }
 
-        if (!gearHasKnife()) {
+        if (this.fletchEnabled() && !gearHasKnife()) {
             if ((Bank.count('Knife') || 0) > 0) {
                 this.log('gear: withdrawing Knife');
                 await Bank.withdrawX('Knife', 1);
                 await Execution.delayTicks(1);
             } else {
-                this.log('gear: no Knife in bank — will pick up behind Bob');
+                this.log('gear: no Knife in bank — walking to Lumbridge castle spawn');
             }
         }
 
@@ -810,7 +874,7 @@ class FaladorTreeFletcher extends LoopingBot {
             this.log(`gear: keeping ${held} in pack (Attack too low to wield)`);
         }
 
-        if (!gearHasKnife()) {
+        if (this.fletchEnabled() && !gearHasKnife()) {
             return await this.pickupLumbridgeKnife();
         }
 
@@ -834,7 +898,7 @@ class FaladorTreeFletcher extends LoopingBot {
 
     async pickupLumbridgeKnife() {
         this.status = 'gear: knife spawn';
-        this.log('gear: walking to Lumbridge knife spawn (behind Bob)');
+        this.log('gear: walking to Lumbridge knife spawn (beside castle / behind Bob)');
         await Traversal.walkResilient(GEAR_KNIFE_SPAWN, {
             radius: 1,
             log: m => this.log(`  ${m}`)
@@ -997,7 +1061,7 @@ class FaladorTreeFletcher extends LoopingBot {
     }
 
     async fletchLogs(plan) {
-        if (logCount() === 0) {
+        if (!plan.fletch || logCount() === 0) {
             return;
         }
 
@@ -1009,8 +1073,9 @@ class FaladorTreeFletcher extends LoopingBot {
         const knife = knifeItem();
         const log = lastLog();
         if (!knife) {
-            this.log('WARNING: no Knife in inventory — cannot fletch');
-            await Execution.delayTicks(5);
+            this.gearReady = false;
+            this.log('WARNING: no Knife in inventory — checking nearest bank');
+            await Execution.delayTicks(2);
             return;
         }
         if (!log) {
@@ -1104,6 +1169,7 @@ class FaladorTreeFletcher extends LoopingBot {
     }
 
     async bankProductsAndReturn() {
+        const plan = this.currentPlan();
         const flvl = Skills.level('fletching');
         const bows = bowCount();
         const shorts = shortbowCount();
@@ -1113,7 +1179,8 @@ class FaladorTreeFletcher extends LoopingBot {
             `banking` +
                 (shorts ? ` ${shorts} Shortbow` : '') +
                 (bows - shorts > 0 ? ` ${bows - shorts} Longbow` : '') +
-                (shafts && flvl >= SHORTBOW_LEVEL ? ` ${shafts} arrow shafts` : '') +
+                (shafts && plan.id !== 'shafts' ? ` ${shafts} arrow shafts` : '') +
+                (!plan.fletch && logCount() ? ` ${logCount()} logs` : '') +
                 ` (fletching ${flvl})`
         );
 
@@ -1123,7 +1190,7 @@ class FaladorTreeFletcher extends LoopingBot {
                     return false;
                 }
                 if (isShaft(name)) {
-                    return flvl >= SHORTBOW_LEVEL;
+                    return plan.id !== 'shafts';
                 }
                 if (isBankableBow(name)) {
                     return true;
@@ -1135,6 +1202,14 @@ class FaladorTreeFletcher extends LoopingBot {
                 if ((Bank.count(GEAR_BROKEN_AXE) || 0) > 0 && !gearHasBrokenAxe()) {
                     this.log('gear: withdrawing Broken axe');
                     await Bank.withdrawX(GEAR_BROKEN_AXE, 1);
+                }
+                if (this.fletchEnabled() && !gearHasKnife()) {
+                    if ((Bank.count('Knife') || 0) > 0) {
+                        this.log('gear: withdrawing Knife');
+                        await Bank.withdrawX('Knife', 1);
+                    } else {
+                        this.gearReady = false;
+                    }
                 }
                 this.maybeQueueSteelBuy();
             },
@@ -1154,7 +1229,7 @@ class FaladorTreeFletcher extends LoopingBot {
     }
 
     onPaint(ctx) {
-        const plan = fletchPlan(Skills.level('fletching'));
+        const plan = this.currentPlan();
         const elapsed = Date.now() - this.startedAt;
         const hrs = elapsed / 3_600_000;
         const wcXp = Skills.xp('woodcutting') - this.wcXpAtStart;
@@ -1187,10 +1262,28 @@ class FaladorTreeFletcher extends LoopingBot {
 
 export default defineBot({
     name: SCRIPT_NAME,
-    version: '1.1.0',
+    version: '1.2.0',
     category: 'Fletching',
     tags: ['woodcutting', 'fletching', 'falador', 'trees', 'arrow shafts', 'shortbow', 'longbow'],
     description:
-        'Chop Trees at 2953,3407 (15t leash). Shafts → bank shafts + Shortbow @5 → Longbow @10; bank and return.',
+        'Chops regular trees west of Falador (2953,3407). Banks logs. If fletching is on: arrow shafts, or shortbows at 5 / longbows at 10 — then banks the bows. Knife required to fletch (bank, else Lumbridge castle spawn).',
+    settingsSchema: {
+        fletchLogs: {
+            type: 'boolean',
+            default: true,
+            label: 'Fletch logs',
+            group: 'Fletching',
+            help: 'When on: fletch logs (needs a Knife). When off: bank the logs instead.'
+        },
+        regularLogProduct: {
+            type: 'string',
+            default: REGULAR_BOWS,
+            options: [REGULAR_BOWS, REGULAR_SHAFTS],
+            label: 'Regular logs',
+            group: 'Fletching',
+            showIf: { key: 'fletchLogs', anyOf: [true] },
+            help: 'When fletching regular logs: short/longbows by level, or arrow shafts (heads).'
+        }
+    },
     create: () => new FaladorTreeFletcher()
 });

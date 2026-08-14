@@ -1,7 +1,7 @@
 /**
- * MapleTreeFletcher — chop Maple trees at 2726,3500 (20t leash), fletch maple bows by level, bank.
- * Fletching: Maple shortbow @50 → Maple longbow @55 (bank maple logs below 50).
- * Knife required (inventory, else bank); stops if none available.
+ * MapleTreeFletcher — chop Maple trees at 2726,3500 (20t leash), bank.
+ * If fletching is on: maple shortbows at 50 / maple longbows at 55, then bank those.
+ * Knife required to fletch (inventory, else bank). Seers Village: stops if none available.
  * Completely vibe coded by @.benzyme on Discord via Cursor AI
  * Self-contained ESM for rs2b0t Load local script / Load URL.
  */
@@ -341,8 +341,8 @@ function isMapleLog(name) {
 }
 
 /** Current fletch product for the make-menu + banking phase. */
-function fletchPlan(level) {
-    if (level < SHORTBOW_LEVEL) {
+function fletchPlan(level, fletchOn = true) {
+    if (!fletchOn || level < SHORTBOW_LEVEL) {
         return {
             id: 'logs',
             menuMatch: '',
@@ -440,6 +440,18 @@ class MapleTreeFletcher extends LoopingBot {
     gearReady = false;
     needSteelBuy = false;
 
+    fletchEnabled() {
+        return this.settings?.bool('fletchLogs', true) ?? true;
+    }
+
+    planAt(level) {
+        return fletchPlan(level, this.fletchEnabled());
+    }
+
+    currentPlan() {
+        return this.planAt(Skills.level('fletching'));
+    }
+
     async onStart() {
         await Execution.delayUntil(() => Game.ingame() && Game.tile() !== null, 0);
         Traversal.preload();
@@ -447,13 +459,13 @@ class MapleTreeFletcher extends LoopingBot {
         this.startedAt = Date.now();
         this.wcXpAtStart = Skills.xp('woodcutting');
         this.fletchXpAtStart = Skills.xp('fletching');
-        this.planId = fletchPlan(Skills.level('fletching')).id;
+        this.planId = this.currentPlan().id;
         this.gearReady = false;
         this.needSteelBuy = false;
 
         this.on('skill.level', e => {
             if (e.name === 'fletching') {
-                const plan = fletchPlan(e.level);
+                const plan = this.planAt(e.level);
                 this.log(`fletching ${e.previous} → ${e.level} — now making ${plan.label}`);
                 this.planId = plan.id;
             }
@@ -465,10 +477,12 @@ class MapleTreeFletcher extends LoopingBot {
             }
         });
 
-        const plan = fletchPlan(Skills.level('fletching'));
+        const plan = this.currentPlan();
         this.log(
             `MapleTreeFletcher @ ${ANCHOR.x},${ANCHOR.z} (leash ${LEASH}) — ` +
-                `fletching ${Skills.level('fletching')} → ${plan.label}`
+                (this.fletchEnabled()
+                    ? `fletching ${Skills.level('fletching')} → ${plan.label}`
+                    : 'banking logs (fletch off)')
         );
         this.status = 'ready';
     }
@@ -503,11 +517,13 @@ class MapleTreeFletcher extends LoopingBot {
             return;
         }
 
-        const plan = fletchPlan(Skills.level('fletching'));
+        const plan = this.currentPlan();
         this.planId = plan.id;
 
         if (ChatDialog.isMakeMenu()) {
-            await this.chooseMakeProduct(plan);
+            if (plan.fletch) {
+                await this.chooseMakeProduct(plan);
+            }
             return;
         }
 
@@ -712,7 +728,7 @@ class MapleTreeFletcher extends LoopingBot {
             if (held && !Equipment.contains(held) && canWieldTool(held, Skills.level('attack'))) {
                 await Equipment.equip(held);
             }
-            if (!gearBestHeldAxe() || !gearHasKnife()) {
+            if (!gearBestHeldAxe() || (this.fletchEnabled() && !gearHasKnife())) {
                 this.gearReady = false;
             }
         } else {
@@ -730,6 +746,11 @@ class MapleTreeFletcher extends LoopingBot {
         // Broken axe always wins — take it to Bob before anything else.
         if (gearHasBrokenAxe() || (Bank.isOpen() && (Bank.count(GEAR_BROKEN_AXE) || 0) > 0)) {
             return await this.repairBrokenAxeAtBob();
+        }
+
+        if (this.gearReady && this.fletchEnabled() && !gearHasKnife()) {
+            this.log('gear: Knife missing — checking nearest bank');
+            this.gearReady = false;
         }
 
         if (this.gearReady && !this.needSteelBuy) {
@@ -798,7 +819,7 @@ class MapleTreeFletcher extends LoopingBot {
             await Execution.delayTicks(1);
         }
 
-        if (!gearHasKnife()) {
+        if (this.fletchEnabled() && !gearHasKnife()) {
             if ((Bank.count('Knife') || 0) > 0) {
                 this.log('gear: withdrawing Knife');
                 await Bank.withdrawX('Knife', 1);
@@ -843,7 +864,7 @@ class MapleTreeFletcher extends LoopingBot {
             this.log(`gear: keeping ${held} in pack (Attack too low to wield)`);
         }
 
-        if (!gearHasKnife()) {
+        if (this.fletchEnabled() && !gearHasKnife()) {
             this.stopNoKnife('gear');
             return true;
         }
@@ -866,12 +887,12 @@ class MapleTreeFletcher extends LoopingBot {
         return true;
     }
 
-    /** No Knife in inventory or bank — stop rather than walk to Lumbridge. */
+    /** Fletch on, no Knife in inventory or bank — stop (Seers is too far from Lumbridge). */
     stopNoKnife(context) {
         this.status = 'no knife — stopped';
         this.log(
             `${context}: no Knife in inventory or bank — stopping ` +
-                '(withdraw a Knife, then restart)'
+                '(Seers Village will not walk to Lumbridge; withdraw a Knife, then restart)'
         );
         stopScript();
     }
@@ -1145,7 +1166,7 @@ class MapleTreeFletcher extends LoopingBot {
                     this.log('gear: withdrawing Broken axe');
                     await Bank.withdrawX(GEAR_BROKEN_AXE, 1);
                 }
-                if (!gearHasKnife()) {
+                if (this.fletchEnabled() && !gearHasKnife()) {
                     if ((Bank.count('Knife') || 0) > 0) {
                         this.log('gear: withdrawing Knife');
                         await Bank.withdrawX('Knife', 1);
@@ -1172,7 +1193,7 @@ class MapleTreeFletcher extends LoopingBot {
     }
 
     onPaint(ctx) {
-        const plan = fletchPlan(Skills.level('fletching'));
+        const plan = this.currentPlan();
         const elapsed = Date.now() - this.startedAt;
         const hrs = elapsed / 3_600_000;
         const wcXp = Skills.xp('woodcutting') - this.wcXpAtStart;
@@ -1205,10 +1226,19 @@ class MapleTreeFletcher extends LoopingBot {
 
 export default defineBot({
     name: SCRIPT_NAME,
-    version: '1.0.0',
+    version: '1.1.0',
     category: 'Fletching',
     tags: ['woodcutting', 'fletching', 'maple', 'shortbow', 'longbow'],
     description:
-        'Chop Maple trees at 2726,3500 (20t leash). Bank maple logs <50 → Maple shortbow @50 → Maple longbow @55; bank and return. Stops if no Knife.',
+        'Chops maples near Seers\' Village (2726,3500). Banks logs. If fletching is on: maple shortbows at 50 / maple longbows at 55 — then banks those. Stops if fletching is on and there is no knife.',
+    settingsSchema: {
+        fletchLogs: {
+            type: 'boolean',
+            default: true,
+            label: 'Fletch logs into bows',
+            group: 'Fletching',
+            help: 'When on: fletch maple logs into bows (needs a Knife). When off: bank the logs instead. Missing Knife in Seers Village stops the script.'
+        }
+    },
     create: () => new MapleTreeFletcher()
 });

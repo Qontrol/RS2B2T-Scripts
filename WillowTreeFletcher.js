@@ -1,6 +1,7 @@
 /**
- * WillowTreeFletcher — chop Willows at 3087,3235 (20t leash), fletch willow bows by level, bank.
- * Fletching: Willow shortbow @35 → Willow longbow @40 (bank willow logs below 35).
+ * WillowTreeFletcher — chop Willows at 3087,3235 (20t leash), bank.
+ * If fletching is on: willow shortbows at 35 / willow longbows at 40, then bank those.
+ * Knife required to fletch; missing knife → nearest bank, else Lumbridge castle spawn.
  * Completely vibe coded by @.benzyme on Discord via Cursor AI
  * Self-contained ESM for rs2b0t Load local script / Load URL.
  */
@@ -132,7 +133,7 @@ const LOG_NAME = 'Willow logs';
 const SHORTBOW_LEVEL = 35;
 const LONGBOW_LEVEL = 40;
 
-/** Lumbridge knife spawn (behind Bob's) + Bob steel axe / repair. */
+/** Lumbridge knife spawn (castle / behind Bob's) + Bob steel axe / repair. */
 const GEAR_KNIFE_SPAWN = new Tile(3224, 3202, 0);
 const GEAR_BOB_STAND = new Tile(3231, 3203, 0);
 const GEAR_STEEL_AXE = 'Steel axe';
@@ -330,8 +331,8 @@ function isWillowLog(name) {
 }
 
 /** Current fletch product for the make-menu + banking phase. */
-function fletchPlan(level) {
-    if (level < SHORTBOW_LEVEL) {
+function fletchPlan(level, fletchOn = true) {
+    if (!fletchOn || level < SHORTBOW_LEVEL) {
         return {
             id: 'logs',
             menuMatch: '',
@@ -429,6 +430,18 @@ class WillowTreeFletcher extends LoopingBot {
     gearReady = false;
     needSteelBuy = false;
 
+    fletchEnabled() {
+        return this.settings?.bool('fletchLogs', true) ?? true;
+    }
+
+    planAt(level) {
+        return fletchPlan(level, this.fletchEnabled());
+    }
+
+    currentPlan() {
+        return this.planAt(Skills.level('fletching'));
+    }
+
     async onStart() {
         await Execution.delayUntil(() => Game.ingame() && Game.tile() !== null, 0);
         Traversal.preload();
@@ -436,13 +449,13 @@ class WillowTreeFletcher extends LoopingBot {
         this.startedAt = Date.now();
         this.wcXpAtStart = Skills.xp('woodcutting');
         this.fletchXpAtStart = Skills.xp('fletching');
-        this.planId = fletchPlan(Skills.level('fletching')).id;
+        this.planId = this.currentPlan().id;
         this.gearReady = false;
         this.needSteelBuy = false;
 
         this.on('skill.level', e => {
             if (e.name === 'fletching') {
-                const plan = fletchPlan(e.level);
+                const plan = this.planAt(e.level);
                 this.log(`fletching ${e.previous} → ${e.level} — now making ${plan.label}`);
                 this.planId = plan.id;
             }
@@ -454,10 +467,12 @@ class WillowTreeFletcher extends LoopingBot {
             }
         });
 
-        const plan = fletchPlan(Skills.level('fletching'));
+        const plan = this.currentPlan();
         this.log(
             `WillowTreeFletcher @ ${ANCHOR.x},${ANCHOR.z} (leash ${LEASH}) — ` +
-                `fletching ${Skills.level('fletching')} → ${plan.label}`
+                (this.fletchEnabled()
+                    ? `fletching ${Skills.level('fletching')} → ${plan.label}`
+                    : 'banking logs (fletch off)')
         );
         this.status = 'ready';
     }
@@ -492,11 +507,13 @@ class WillowTreeFletcher extends LoopingBot {
             return;
         }
 
-        const plan = fletchPlan(Skills.level('fletching'));
+        const plan = this.currentPlan();
         this.planId = plan.id;
 
         if (ChatDialog.isMakeMenu()) {
-            await this.chooseMakeProduct(plan);
+            if (plan.fletch) {
+                await this.chooseMakeProduct(plan);
+            }
             return;
         }
 
@@ -701,7 +718,7 @@ class WillowTreeFletcher extends LoopingBot {
             if (held && !Equipment.contains(held) && canWieldTool(held, Skills.level('attack'))) {
                 await Equipment.equip(held);
             }
-            if (!gearBestHeldAxe() || !gearHasKnife()) {
+            if (!gearBestHeldAxe() || (this.fletchEnabled() && !gearHasKnife())) {
                 this.gearReady = false;
             }
         } else {
@@ -719,6 +736,11 @@ class WillowTreeFletcher extends LoopingBot {
         // Broken axe always wins — take it to Bob before anything else.
         if (gearHasBrokenAxe() || (Bank.isOpen() && (Bank.count(GEAR_BROKEN_AXE) || 0) > 0)) {
             return await this.repairBrokenAxeAtBob();
+        }
+
+        if (this.gearReady && this.fletchEnabled() && !gearHasKnife()) {
+            this.log('gear: Knife missing — checking nearest bank');
+            this.gearReady = false;
         }
 
         if (this.gearReady && !this.needSteelBuy) {
@@ -787,13 +809,13 @@ class WillowTreeFletcher extends LoopingBot {
             await Execution.delayTicks(1);
         }
 
-        if (!gearHasKnife()) {
+        if (this.fletchEnabled() && !gearHasKnife()) {
             if ((Bank.count('Knife') || 0) > 0) {
                 this.log('gear: withdrawing Knife');
                 await Bank.withdrawX('Knife', 1);
                 await Execution.delayTicks(1);
             } else {
-                this.log('gear: no Knife in bank — will pick up behind Bob');
+                this.log('gear: no Knife in bank — walking to Lumbridge castle spawn');
             }
         }
 
@@ -830,7 +852,7 @@ class WillowTreeFletcher extends LoopingBot {
             this.log(`gear: keeping ${held} in pack (Attack too low to wield)`);
         }
 
-        if (!gearHasKnife()) {
+        if (this.fletchEnabled() && !gearHasKnife()) {
             return await this.pickupLumbridgeKnife();
         }
 
@@ -854,7 +876,7 @@ class WillowTreeFletcher extends LoopingBot {
 
     async pickupLumbridgeKnife() {
         this.status = 'gear: knife spawn';
-        this.log('gear: walking to Lumbridge knife spawn (behind Bob)');
+        this.log('gear: walking to Lumbridge knife spawn (beside castle / behind Bob)');
         await Traversal.walkResilient(GEAR_KNIFE_SPAWN, {
             radius: 1,
             log: m => this.log(`  ${m}`)
@@ -1029,8 +1051,9 @@ class WillowTreeFletcher extends LoopingBot {
         const knife = knifeItem();
         const log = lastLog();
         if (!knife) {
-            this.log('WARNING: no Knife in inventory — cannot fletch');
-            await Execution.delayTicks(5);
+            this.gearReady = false;
+            this.log('WARNING: no Knife in inventory — checking nearest bank');
+            await Execution.delayTicks(2);
             return;
         }
         if (!log) {
@@ -1156,6 +1179,14 @@ class WillowTreeFletcher extends LoopingBot {
                     this.log('gear: withdrawing Broken axe');
                     await Bank.withdrawX(GEAR_BROKEN_AXE, 1);
                 }
+                if (this.fletchEnabled() && !gearHasKnife()) {
+                    if ((Bank.count('Knife') || 0) > 0) {
+                        this.log('gear: withdrawing Knife');
+                        await Bank.withdrawX('Knife', 1);
+                    } else {
+                        this.gearReady = false;
+                    }
+                }
                 this.maybeQueueSteelBuy();
             },
             returnTo: ANCHOR,
@@ -1174,7 +1205,7 @@ class WillowTreeFletcher extends LoopingBot {
     }
 
     onPaint(ctx) {
-        const plan = fletchPlan(Skills.level('fletching'));
+        const plan = this.currentPlan();
         const elapsed = Date.now() - this.startedAt;
         const hrs = elapsed / 3_600_000;
         const wcXp = Skills.xp('woodcutting') - this.wcXpAtStart;
@@ -1207,10 +1238,19 @@ class WillowTreeFletcher extends LoopingBot {
 
 export default defineBot({
     name: SCRIPT_NAME,
-    version: '1.0.0',
+    version: '1.1.0',
     category: 'Fletching',
     tags: ['woodcutting', 'fletching', 'willow', 'shortbow', 'longbow'],
     description:
-        'Chop Willows at 3087,3235 (20t leash). Bank willow logs <35 → Willow shortbow @35 → Willow longbow @40; bank and return.',
+        'Chops willows at Draynor (3087,3235). Banks logs. If fletching is on: willow shortbows at 35 / willow longbows at 40 — then banks those. Knife required to fletch (bank, else Lumbridge castle spawn).',
+    settingsSchema: {
+        fletchLogs: {
+            type: 'boolean',
+            default: true,
+            label: 'Fletch logs into bows',
+            group: 'Fletching',
+            help: 'When on: fletch willow logs into bows (needs a Knife). When off: bank the logs instead.'
+        }
+    },
     create: () => new WillowTreeFletcher()
 });

@@ -1,6 +1,8 @@
 /**
- * OakTreeFletcherSell — same oak camp/fletch as OakTreeFletcher, but sells bows
- * at Varrock General Store then banks the coins (keeps knife/axe).
+ * OakTreeFletcherSell — same oak camp as OakTreeFletcher; banks logs.
+ * If fletching is on: oak shortbows at 20 / longbows at 25, sell at Varrock General,
+ * bank the coins (keeps knife/axe), then back to the oaks.
+ * Knife required to fletch; missing knife → nearest bank, else Lumbridge castle spawn.
  * Completely vibe coded by @.benzyme on Discord via Cursor AI
  * Self-contained ESM for rs2b0t Load local script / Load URL.
  */
@@ -326,8 +328,8 @@ function isCoins(name) {
     return normName(name) === 'coins';
 }
 
-function fletchPlan(level) {
-    if (level < SHORTBOW_LEVEL) {
+function fletchPlan(level, fletchOn = true) {
+    if (!fletchOn || level < SHORTBOW_LEVEL) {
         return {
             id: 'logs',
             menuMatch: '',
@@ -462,6 +464,18 @@ class OakTreeFletcherSell extends LoopingBot {
     gearReady = false;
     needSteelBuy = false;
 
+    fletchEnabled() {
+        return this.settings?.bool('fletchLogs', true) ?? true;
+    }
+
+    planAt(level) {
+        return fletchPlan(level, this.fletchEnabled());
+    }
+
+    currentPlan() {
+        return this.planAt(Skills.level('fletching'));
+    }
+
     async onStart() {
         await Execution.delayUntil(() => Game.ingame() && Game.tile() !== null, 0);
         Traversal.preload();
@@ -470,13 +484,13 @@ class OakTreeFletcherSell extends LoopingBot {
         this.wcXpAtStart = Skills.xp('woodcutting');
         this.fletchXpAtStart = Skills.xp('fletching');
         this.totalGpEarned = 0;
-        this.planId = fletchPlan(Skills.level('fletching')).id;
+        this.planId = this.currentPlan().id;
         this.gearReady = false;
         this.needSteelBuy = false;
 
         this.on('skill.level', e => {
             if (e.name === 'fletching') {
-                const plan = fletchPlan(e.level);
+                const plan = this.planAt(e.level);
                 this.log(`fletching ${e.previous} → ${e.level} — now making ${plan.label}`);
                 this.planId = plan.id;
             }
@@ -488,11 +502,12 @@ class OakTreeFletcherSell extends LoopingBot {
             }
         });
 
-        const plan = fletchPlan(Skills.level('fletching'));
+        const plan = this.currentPlan();
         this.log(
             `OakTreeFletcherSell @ ${ANCHOR.x},${ANCHOR.z} (leash ${LEASH}) — ` +
-                `fletching ${Skills.level('fletching')} → ${plan.label}; ` +
-                `sell bows @ Varrock General → bank GP`
+                (this.fletchEnabled()
+                    ? `fletching ${Skills.level('fletching')} → ${plan.label}; sell bows @ Varrock General → bank GP`
+                    : 'banking logs (fletch off)')
         );
         this.status = 'ready';
     }
@@ -527,11 +542,13 @@ class OakTreeFletcherSell extends LoopingBot {
             return;
         }
 
-        const plan = fletchPlan(Skills.level('fletching'));
+        const plan = this.currentPlan();
         this.planId = plan.id;
 
         if (ChatDialog.isMakeMenu()) {
-            await this.chooseMakeProduct(plan);
+            if (plan.fletch) {
+                await this.chooseMakeProduct(plan);
+            }
             return;
         }
 
@@ -735,7 +752,7 @@ class OakTreeFletcherSell extends LoopingBot {
             if (held && !Equipment.contains(held) && canWieldTool(held, Skills.level('attack'))) {
                 await Equipment.equip(held);
             }
-            if (!gearBestHeldAxe() || !gearHasKnife()) {
+            if (!gearBestHeldAxe() || (this.fletchEnabled() && !gearHasKnife())) {
                 this.gearReady = false;
             }
         } else {
@@ -753,6 +770,11 @@ class OakTreeFletcherSell extends LoopingBot {
         // Broken axe always wins — take it to Bob before anything else.
         if (gearHasBrokenAxe() || (Bank.isOpen() && (Bank.count(GEAR_BROKEN_AXE) || 0) > 0)) {
             return await this.repairBrokenAxeAtBob();
+        }
+
+        if (this.gearReady && this.fletchEnabled() && !gearHasKnife()) {
+            this.log('gear: Knife missing — checking nearest bank');
+            this.gearReady = false;
         }
 
         if (this.gearReady && !this.needSteelBuy) {
@@ -821,13 +843,13 @@ class OakTreeFletcherSell extends LoopingBot {
             await Execution.delayTicks(1);
         }
 
-        if (!gearHasKnife()) {
+        if (this.fletchEnabled() && !gearHasKnife()) {
             if ((Bank.count('Knife') || 0) > 0) {
                 this.log('gear: withdrawing Knife');
                 await Bank.withdrawX('Knife', 1);
                 await Execution.delayTicks(1);
             } else {
-                this.log('gear: no Knife in bank — will pick up behind Bob');
+                this.log('gear: no Knife in bank — walking to Lumbridge castle spawn');
             }
         }
 
@@ -864,7 +886,7 @@ class OakTreeFletcherSell extends LoopingBot {
             this.log(`gear: keeping ${held} in pack (Attack too low to wield)`);
         }
 
-        if (!gearHasKnife()) {
+        if (this.fletchEnabled() && !gearHasKnife()) {
             return await this.pickupLumbridgeKnife();
         }
 
@@ -888,7 +910,7 @@ class OakTreeFletcherSell extends LoopingBot {
 
     async pickupLumbridgeKnife() {
         this.status = 'gear: knife spawn';
-        this.log('gear: walking to Lumbridge knife spawn (behind Bob)');
+        this.log('gear: walking to Lumbridge knife spawn (beside castle / behind Bob)');
         await Traversal.walkResilient(GEAR_KNIFE_SPAWN, {
             radius: 1,
             log: m => this.log(`  ${m}`)
@@ -1063,8 +1085,9 @@ class OakTreeFletcherSell extends LoopingBot {
         const knife = knifeItem();
         const log = lastLog();
         if (!knife) {
-            this.log('WARNING: no Knife in inventory — cannot fletch');
-            await Execution.delayTicks(5);
+            this.gearReady = false;
+            this.log('WARNING: no Knife in inventory — checking nearest bank');
+            await Execution.delayTicks(2);
             return;
         }
         if (!log) {
@@ -1245,6 +1268,14 @@ class OakTreeFletcherSell extends LoopingBot {
                     this.log('gear: withdrawing Broken axe');
                     await Bank.withdrawX(GEAR_BROKEN_AXE, 1);
                 }
+                if (this.fletchEnabled() && !gearHasKnife()) {
+                    if ((Bank.count('Knife') || 0) > 0) {
+                        this.log('gear: withdrawing Knife');
+                        await Bank.withdrawX('Knife', 1);
+                    } else {
+                        this.gearReady = false;
+                    }
+                }
                 await this.refreshBankGp();
                 this.maybeQueueSteelBuy();
             },
@@ -1288,6 +1319,14 @@ class OakTreeFletcherSell extends LoopingBot {
                     this.log('gear: withdrawing Broken axe');
                     await Bank.withdrawX(GEAR_BROKEN_AXE, 1);
                 }
+                if (this.fletchEnabled() && !gearHasKnife()) {
+                    if ((Bank.count('Knife') || 0) > 0) {
+                        this.log('gear: withdrawing Knife');
+                        await Bank.withdrawX('Knife', 1);
+                    } else {
+                        this.gearReady = false;
+                    }
+                }
                 this.maybeQueueSteelBuy();
             },
             returnTo: ANCHOR,
@@ -1307,7 +1346,7 @@ class OakTreeFletcherSell extends LoopingBot {
     }
 
     onPaint(ctx) {
-        const plan = fletchPlan(Skills.level('fletching'));
+        const plan = this.currentPlan();
         const elapsed = Date.now() - this.startedAt;
         const hrs = elapsed / 3_600_000;
         const wcXp = Skills.xp('woodcutting') - this.wcXpAtStart;
@@ -1340,10 +1379,19 @@ class OakTreeFletcherSell extends LoopingBot {
 
 export default defineBot({
     name: SCRIPT_NAME,
-    version: '1.0.0',
+    version: '1.1.0',
     category: 'Fletching',
     tags: ['woodcutting', 'fletching', 'oak', 'shortbow', 'longbow', 'sell', 'varrock'],
     description:
-        'Oaks at 3166,3416. Oak shortbow @20 / longbow @25 → sell all bows at Varrock General Store → bank GP → return. Logs banked below 20.',
+        'Chops oaks north of Varrock (3166,3416). Banks logs. If fletching is on: oak shortbows at 20 / longbows at 25, sells them at Varrock General, banks the coins (keeps knife/axe), then returns. Knife required to fletch (bank, else Lumbridge castle spawn).',
+    settingsSchema: {
+        fletchLogs: {
+            type: 'boolean',
+            default: true,
+            label: 'Fletch logs into bows',
+            group: 'Fletching',
+            help: 'When on: fletch oak logs into bows and sell them (needs a Knife). When off: bank the logs instead.'
+        }
+    },
     create: () => new OakTreeFletcherSell()
 });
